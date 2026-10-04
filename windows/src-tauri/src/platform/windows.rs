@@ -249,7 +249,7 @@ pub fn bring_to_top(win: &WebviewWindow) {
         let _ = BringWindowToTop(hwnd);
         let _ = SetWindowPos(
             hwnd,
-            HWND_TOPMOST,
+            Some(HWND_TOPMOST),
             0,
             0,
             0,

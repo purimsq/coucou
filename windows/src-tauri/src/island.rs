@@ -91,7 +91,7 @@ impl PollGate {
     }
 
     pub fn wait_timeout(&self, dur: Duration) -> bool {
-        let mut guard = self.active.lock().unwrap();
+        let guard = self.active.lock().unwrap();
         if *guard {
             return true;
         }
