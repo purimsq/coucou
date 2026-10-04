@@ -69,17 +69,33 @@ pub struct ChatReply {
     pub text: String,
 }
 
-/// One chat turn. Dispatches to Gemini if model starts with "gemini", else Anthropic.
+/// One chat turn. Dispatches to Gemini if model starts with "gemini" or if
+/// only Gemini key is configured.
 pub async fn send(
     chat: &Chat,
     model: &str,
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
+    let has_anthropic = secrets::present("anthropic-api-key");
+    let has_gemini = secrets::present("gemini-api-key");
+
     if model.starts_with("gemini") {
-        send_gemini(chat, model, query, context).await
+        if has_gemini {
+            send_gemini(chat, model, query, context).await
+        } else if has_anthropic {
+            send_anthropic(chat, "claude-opus-5", query, context).await
+        } else {
+            Err("Gemini API key missing. Open settings to enter your Google AI key.".to_string())
+        }
     } else {
-        send_anthropic(chat, model, query, context).await
+        if has_anthropic {
+            send_anthropic(chat, model, query, context).await
+        } else if has_gemini {
+            send_gemini(chat, "gemini-2.5-flash", query, context).await
+        } else {
+            Err("API key missing. Open settings to enter your Anthropic or Google Gemini API key.".to_string())
+        }
     }
 }
 

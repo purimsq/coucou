@@ -90,6 +90,15 @@ impl PollGate {
         self.cv.notify_all();
     }
 
+    pub fn wait_timeout(&self, dur: Duration) -> bool {
+        let mut guard = self.active.lock().unwrap();
+        if *guard {
+            return true;
+        }
+        let (g, _) = self.cv.wait_timeout(guard, dur).unwrap();
+        *g
+    }
+
     fn wait_until_active(&self) {
         let mut guard = self.active.lock().unwrap();
         while !*guard {
@@ -176,6 +185,9 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     // Moving across displays can rescale the window: re-assert the physical size.
     let _ = win.set_size(PhysicalSize::new(pw, ph));
     let _ = win.set_always_on_top(true);
+    if !collapsed {
+        platform::bring_to_top(&win);
+    }
 }
 
 /// Position, size and scale of the monitor the island lives on. Any change here
@@ -204,7 +216,40 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
         // find no cursor costs CPU for nothing.
         let (period, screen_every) = if platform::CURSOR_POLL { (16, 30) } else { (500, 1) };
         loop {
-            gate.wait_until_active();
+            if !gate.is_active() {
+                // Island is collapsed/hidden: check at a relaxed rate (~12 Hz)
+                // so hover at the top-center wakes Mochi even with top bars like Seelen UI.
+                if !gate.wait_timeout(Duration::from_millis(80)) {
+                    if platform::CURSOR_POLL {
+                        if let Some((cx, cy)) = cursor_physical() {
+                            let pref = app
+                                .try_state::<crate::Shared>()
+                                .map(|s| s.settings.lock().unwrap().screen.clone())
+                                .unwrap_or_else(|| "primary".into());
+                            if let Some(m) = target_monitor(&app, &pref) {
+                                let scale = m.scale_factor();
+                                let mp = *m.position();
+                                let ms = *m.size();
+                                let pw = (STRIP_W * scale).round() as i32;
+                                let ph = (STRIP_H * scale).round() as i32;
+                                let x0 = mp.x + (ms.width as i32 - pw) / 2;
+                                let x1 = x0 + pw;
+                                let y0 = mp.y;
+                                let y1 = mp.y + ph;
+
+                                if cx >= x0 as f64 && cx <= x1 as f64 && cy >= y0 as f64 && cy <= y1 as f64 {
+                                    if let Some(win) = window(&app) {
+                                        platform::bring_to_top(&win);
+                                        let _ = win.emit("wake", ());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
             let mut last = (f64::MIN, f64::MIN);
             let mut ticks: u32 = 0;
             while gate.is_active() {

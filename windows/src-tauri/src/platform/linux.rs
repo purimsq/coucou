@@ -268,6 +268,8 @@ pub fn make_non_activating(win: &WebviewWindow) {
     crate::log::line("island is a layer-shell overlay");
 }
 
+pub fn bring_to_top(_win: &WebviewWindow) {}
+
 /// Temporarily allow keyboard focus so a text field inside the island can be
 /// typed in.
 pub fn set_activating(win: &WebviewWindow, activating: bool) {

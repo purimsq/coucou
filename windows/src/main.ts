@@ -25,6 +25,11 @@ async function main() {
   if (boot && !boot.cursorPoll) island.followPageCursor();
 
   await onEvent<{ x: number; y: number }>("cursor", ({ x, y }) => island.onCursor(x, y));
+  await onEvent<null>("wake", () => {
+    if (State.mode === "hidden") {
+      island.fsm.mouseEntered();
+    }
+  });
 
   /** Pause has to reach Rust too, or the pollers keep calling out. */
   const setPaused = (on: boolean) => {
@@ -37,10 +42,12 @@ async function main() {
     switch (what) {
       case "settings":
         setPaused(false);
+        void Bridge.setCollapsed(false);
         island.alert("settings");
         break;
       case "open":
         setPaused(false);
+        void Bridge.setCollapsed(false);
         island.alert(State.defaultView());
         break;
       case "pause":

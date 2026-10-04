@@ -15,8 +15,9 @@ use ::windows::Win32::System::SystemInformation::GetLocalTime;
 use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    BringWindowToTop, EnumChildWindows, GetClassNameW, GetCursorPos, GetWindowLongPtrW,
+    SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 use super::LocalTime;
@@ -237,6 +238,24 @@ pub fn make_non_activating(win: &WebviewWindow) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let want = ex | WS_EX_NOACTIVATE.0 as isize | WS_EX_TOOLWINDOW.0 as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+    }
+}
+
+/// Brings the island to the absolute top of the Z-order without stealing focus,
+/// ensuring it renders above third-party taskbars/overlays such as Seelen UI.
+pub fn bring_to_top(win: &WebviewWindow) {
+    let Some(hwnd) = hwnd_of(win) else { return };
+    unsafe {
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 

@@ -327,10 +327,18 @@ export class Island {
   alert(view: IslandViewName) {
     this.fsm.pinned = State.isPinned;
     this.fsm.forceHome();
+    if (this.collapsed) {
+      this.collapsed = false;
+      void Bridge.setCollapsed(false);
+    }
     this.expand(view);
   }
 
   reveal() {
+    if (this.collapsed) {
+      this.collapsed = false;
+      void Bridge.setCollapsed(false);
+    }
     this.fsm.reveal();
   }
 

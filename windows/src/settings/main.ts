@@ -179,9 +179,13 @@ const MODELS: [string, string][] = [
   ["claude-haiku-4-5", "Claude Haiku 4.5"],
 ];
 
+let updateProviderBadges: () => void = () => {};
+
 function apiSection(hasKey: boolean): HTMLElement {
   const dot = statusDot(hasKey);
   const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — the chat needs one." });
+  const activeBadge = h("span", { class: "badge-active", text: "Active" });
+  const activateBtn = h("button", { class: "btn-activate", text: "Use for chat" });
 
   const field = h("input", {
     type: "password",
@@ -205,6 +209,24 @@ function apiSection(hasKey: boolean): HTMLElement {
     clearBtn.style.display = present ? "" : "none";
   }
 
+  const model = h("select", {}) as HTMLSelectElement;
+  for (const [id, label] of MODELS) model.append(h("option", { value: id, text: label }));
+  if (!MODELS.some(([id]) => id === settings.model)) {
+    model.append(h("option", { value: settings.model, text: settings.model }));
+  }
+  model.value = !settings.model.startsWith("gemini") ? settings.model : "claude-opus-5";
+  model.addEventListener("change", () => {
+    settings.model = model.value;
+    void save();
+    updateProviderBadges();
+  });
+
+  activateBtn.addEventListener("click", () => {
+    settings.model = model.value || "claude-opus-5";
+    void save();
+    updateProviderBadges();
+  });
+
   saveBtn.addEventListener("click", async () => {
     const value = field.value.trim();
     if (!value) return;
@@ -212,8 +234,11 @@ function apiSection(hasKey: boolean): HTMLElement {
     try {
       await Bridge.secretSet("anthropic-api-key", value);
       field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
+      settings.model = model.value || "claude-opus-5";
+      await save();
+      feedback.append(h("div", { class: "notice ok", text: "Saved. Claude is active for chat." }));
       await refresh();
+      updateProviderBadges();
     } catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
     }
@@ -230,23 +255,23 @@ function apiSection(hasKey: boolean): HTMLElement {
     }
   });
 
-  const model = h("select", {}) as HTMLSelectElement;
-  for (const [id, label] of MODELS) model.append(h("option", { value: id, text: label }));
-  if (!MODELS.some(([id]) => id === settings.model)) {
-    model.append(h("option", { value: settings.model, text: settings.model }));
-  }
-  model.value = settings.model;
-  model.addEventListener("change", () => {
-    settings.model = model.value;
-    void save();
-  });
-
   clearBtn.style.display = hasKey ? "" : "none";
+
+  const prevUpdate = updateProviderBadges;
+  updateProviderBadges = () => {
+    prevUpdate();
+    const isGemini = settings.model.startsWith("gemini");
+    activeBadge.style.display = !isGemini ? "" : "none";
+    activateBtn.style.display = isGemini ? "" : "none";
+    if (!isGemini && MODELS.some(([id]) => id === settings.model)) {
+      model.value = settings.model;
+    }
+  };
 
   return h(
     "section",
     {},
-    h("h2", {}, dot, h("span", { text: "Claude" })),
+    h("h2", {}, dot, h("span", { text: "Claude" }), activeBadge, activateBtn),
     state,
     h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
@@ -258,6 +283,7 @@ function apiSection(hasKey: boolean): HTMLElement {
 
 const GEMINI_MODELS: [string, string][] = [
   ["gemini-2.5-flash", "Gemini 2.5 Flash"],
+  ["gemini-2.0-flash", "Gemini 2.0 Flash"],
   ["gemini-2.5-pro", "Gemini 2.5 Pro"],
   ["gemini-1.5-flash", "Gemini 1.5 Flash"],
   ["gemini-1.5-pro", "Gemini 1.5 Pro"],
@@ -266,6 +292,8 @@ const GEMINI_MODELS: [string, string][] = [
 function geminiSection(hasKey: boolean): HTMLElement {
   const dot = statusDot(hasKey);
   const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — enter your Google AI key to chat with Gemini." });
+  const activeBadge = h("span", { class: "badge-active", text: "Active" });
+  const activateBtn = h("button", { class: "btn-activate", text: "Use for chat" });
 
   const field = h("input", {
     type: "password",
@@ -289,6 +317,24 @@ function geminiSection(hasKey: boolean): HTMLElement {
     clearBtn.style.display = present ? "" : "none";
   }
 
+  const model = h("select", {}) as HTMLSelectElement;
+  for (const [id, label] of GEMINI_MODELS) model.append(h("option", { value: id, text: label }));
+  if (!GEMINI_MODELS.some(([id]) => id === settings.model)) {
+    model.append(h("option", { value: settings.model, text: settings.model }));
+  }
+  model.value = settings.model.startsWith("gemini") ? settings.model : "gemini-2.5-flash";
+  model.addEventListener("change", () => {
+    settings.model = model.value;
+    void save();
+    updateProviderBadges();
+  });
+
+  activateBtn.addEventListener("click", () => {
+    settings.model = model.value || "gemini-2.5-flash";
+    void save();
+    updateProviderBadges();
+  });
+
   saveBtn.addEventListener("click", async () => {
     const value = field.value.trim();
     if (!value) return;
@@ -296,8 +342,11 @@ function geminiSection(hasKey: boolean): HTMLElement {
     try {
       await Bridge.secretSet("gemini-api-key", value);
       field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
+      settings.model = model.value || "gemini-2.5-flash";
+      await save();
+      feedback.append(h("div", { class: "notice ok", text: "Saved. Gemini is active for chat." }));
       await refresh();
+      updateProviderBadges();
     } catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
     }
@@ -314,23 +363,23 @@ function geminiSection(hasKey: boolean): HTMLElement {
     }
   });
 
-  const model = h("select", {}) as HTMLSelectElement;
-  for (const [id, label] of GEMINI_MODELS) model.append(h("option", { value: id, text: label }));
-  if (!GEMINI_MODELS.some(([id]) => id === settings.model)) {
-    model.append(h("option", { value: settings.model, text: settings.model }));
-  }
-  model.value = settings.model.startsWith("gemini") ? settings.model : "gemini-2.5-flash";
-  model.addEventListener("change", () => {
-    settings.model = model.value;
-    void save();
-  });
-
   clearBtn.style.display = hasKey ? "" : "none";
+
+  const prevUpdate = updateProviderBadges;
+  updateProviderBadges = () => {
+    prevUpdate();
+    const isGemini = settings.model.startsWith("gemini");
+    activeBadge.style.display = isGemini ? "" : "none";
+    activateBtn.style.display = !isGemini ? "" : "none";
+    if (isGemini && GEMINI_MODELS.some(([id]) => id === settings.model)) {
+      model.value = settings.model;
+    }
+  };
 
   return h(
     "section",
     {},
-    h("h2", {}, dot, h("span", { text: "Google AI (Gemini)" })),
+    h("h2", {}, dot, h("span", { text: "Google AI (Gemini)" }), activeBadge, activateBtn),
     state,
     h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
@@ -537,8 +586,11 @@ async function main() {
     }),
   );
 
+  updateProviderBadges();
+
   void onEvent<Settings>("settings-changed", (s) => {
     settings = { ...settings, ...s };
+    updateProviderBadges();
   });
 }
 

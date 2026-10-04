@@ -93,6 +93,12 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     let pref = shared.settings.lock().unwrap().screen.clone();
     shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
+    if let Some(win) = island::window(&app) {
+        if !collapsed {
+            let _ = win.show();
+            platform::bring_to_top(&win);
+        }
+    }
     // The wake strip must always take the mouse, and a resize invalidates the flag.
     island::refresh_click_through(&app, &shared.gate);
     shared.gate.set_active(!collapsed);
@@ -113,6 +119,7 @@ fn focus_window(app: AppHandle, focused: bool) {
     let Some(win) = island::window(&app) else { return };
     platform::set_activating(&win, focused);
     if focused {
+        platform::bring_to_top(&win);
         let _ = win.set_focus();
     }
 }
