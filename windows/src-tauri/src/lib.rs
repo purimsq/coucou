@@ -150,6 +150,15 @@ fn open_in_vscode(path: Option<String>) -> bool {
             return false;
         }
     }
+    if let Some(antigravity) = platform::find_antigravity() {
+        let mut cmd = Command::new(antigravity);
+        if let Some(p) = path.as_deref() {
+            cmd.arg(p);
+        }
+        if platform::no_console(&mut cmd).spawn().is_ok() {
+            return true;
+        }
+    }
     if let Some(code) = platform::find_on_path("code") {
         let mut cmd = Command::new(code);
         if let Some(p) = path.as_deref() {

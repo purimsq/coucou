@@ -146,6 +146,11 @@ pub fn find_on_path(stem: &str) -> Option<PathBuf> {
         })
 }
 
+pub fn find_antigravity() -> Option<PathBuf> {
+    find_on_path("antigravity").or_else(|| find_on_path("agy"))
+}
+
+
 // ── Cursor ────────────────────────────────────────────────────────────────────
 
 /// Nothing polls the cursor here: the page reports it over the island, and the

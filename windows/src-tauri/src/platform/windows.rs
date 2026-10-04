@@ -102,6 +102,29 @@ pub fn find_on_path(stem: &str) -> Option<PathBuf> {
     None
 }
 
+pub fn find_antigravity() -> Option<PathBuf> {
+    if let Some(p) = find_on_path("antigravity") {
+        return Some(p);
+    }
+    if let Some(p) = find_on_path("agy") {
+        return Some(p);
+    }
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let p = PathBuf::from(&local_app_data).join("Programs").join("antigravity").join("Antigravity.exe");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        let p = PathBuf::from(&program_files).join("Antigravity").join("Antigravity.exe");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+
 // ── Who we are ────────────────────────────────────────────────────────────────
 //
 // Named pipes share one machine-wide namespace, so the SID in the name is what

@@ -19,7 +19,8 @@ pub const PANEL_W: f64 = 720.0;
 pub const PANEL_H: f64 = 320.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
 pub const STRIP_W: f64 = 240.0;
-pub const STRIP_H: f64 = 6.0;
+/// Wake strip height: 42px ensures hover wakes Mochi even with top-bar overlays like Seelen UI (30-36px).
+pub const STRIP_H: f64 = 42.0;
 
 pub const WINDOW_LABEL: &str = "island";
 
