@@ -92,7 +92,7 @@ pub async fn send(
         if has_anthropic {
             send_anthropic(chat, model, query, context).await
         } else if has_gemini {
-            send_gemini(chat, "gemini-2.5-flash", query, context).await
+            send_gemini(chat, "gemini-3.8-flash", query, context).await
         } else {
             Err("API key missing. Open settings to enter your Anthropic or Google Gemini API key.".to_string())
         }

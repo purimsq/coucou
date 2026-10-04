@@ -282,9 +282,10 @@ function apiSection(hasKey: boolean): HTMLElement {
 // ── Google AI (Gemini) section ────────────────────────────────────────────────
 
 const GEMINI_MODELS: [string, string][] = [
+  ["gemini-3.8-flash", "Gemini 3.8 Flash (Latest)"],
+  ["gemini-3.5-flash", "Gemini 3.5 Flash"],
   ["gemini-2.5-flash", "Gemini 2.5 Flash"],
   ["gemini-2.0-flash", "Gemini 2.0 Flash"],
-  ["gemini-2.5-pro", "Gemini 2.5 Pro"],
   ["gemini-1.5-flash", "Gemini 1.5 Flash"],
   ["gemini-1.5-pro", "Gemini 1.5 Pro"],
 ];
@@ -322,7 +323,7 @@ function geminiSection(hasKey: boolean): HTMLElement {
   if (!GEMINI_MODELS.some(([id]) => id === settings.model)) {
     model.append(h("option", { value: settings.model, text: settings.model }));
   }
-  model.value = settings.model.startsWith("gemini") ? settings.model : "gemini-2.5-flash";
+  model.value = settings.model.startsWith("gemini") ? settings.model : "gemini-3.8-flash";
   model.addEventListener("change", () => {
     settings.model = model.value;
     void save();
@@ -330,7 +331,7 @@ function geminiSection(hasKey: boolean): HTMLElement {
   });
 
   activateBtn.addEventListener("click", () => {
-    settings.model = model.value || "gemini-2.5-flash";
+    settings.model = model.value || "gemini-3.8-flash";
     void save();
     updateProviderBadges();
   });
@@ -342,9 +343,9 @@ function geminiSection(hasKey: boolean): HTMLElement {
     try {
       await Bridge.secretSet("gemini-api-key", value);
       field.value = "";
-      settings.model = model.value || "gemini-2.5-flash";
+      settings.model = model.value || "gemini-3.8-flash";
       await save();
-      feedback.append(h("div", { class: "notice ok", text: "Saved. Gemini is active for chat." }));
+      feedback.append(h("div", { class: "notice ok", text: "Saved. Gemini 3.8 is active for chat." }));
       await refresh();
       updateProviderBadges();
     } catch (err) {
