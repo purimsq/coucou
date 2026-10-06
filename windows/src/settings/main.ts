@@ -3,9 +3,10 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus, type UserProfile } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
-import { h, clear } from "../views/dom";
+import { h, clear, svg, dot } from "../views/dom";
+import { ICONS } from "../views/icons";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let version = "";
@@ -282,12 +283,12 @@ function apiSection(hasKey: boolean): HTMLElement {
 // ── Google AI (Gemini) section ────────────────────────────────────────────────
 
 const GEMINI_MODELS: [string, string][] = [
-  ["gemini-3.8-flash", "Gemini 3.8 Flash (Latest)"],
-  ["gemini-3.5-flash", "Gemini 3.5 Flash"],
-  ["gemini-2.5-flash", "Gemini 2.5 Flash"],
-  ["gemini-2.0-flash", "Gemini 2.0 Flash"],
+  ["gemini-2.0-flash", "Gemini 2.0 Flash (Recommended)"],
   ["gemini-1.5-flash", "Gemini 1.5 Flash"],
   ["gemini-1.5-pro", "Gemini 1.5 Pro"],
+  ["gemini-3.8-flash", "Gemini 3.8 Flash (Preview / Billing)"],
+  ["gemini-3.5-flash", "Gemini 3.5 Flash (Preview / Billing)"],
+  ["gemini-2.5-flash", "Gemini 2.5 Flash (Legacy)"],
 ];
 
 function geminiSection(hasKey: boolean): HTMLElement {
@@ -323,7 +324,7 @@ function geminiSection(hasKey: boolean): HTMLElement {
   if (!GEMINI_MODELS.some(([id]) => id === settings.model)) {
     model.append(h("option", { value: settings.model, text: settings.model }));
   }
-  model.value = settings.model.startsWith("gemini") ? settings.model : "gemini-3.8-flash";
+  model.value = settings.model.startsWith("gemini") ? settings.model : "gemini-2.0-flash";
   model.addEventListener("change", () => {
     settings.model = model.value;
     void save();
@@ -331,7 +332,7 @@ function geminiSection(hasKey: boolean): HTMLElement {
   });
 
   activateBtn.addEventListener("click", () => {
-    settings.model = model.value || "gemini-3.8-flash";
+    settings.model = model.value || "gemini-2.0-flash";
     void save();
     updateProviderBadges();
   });
@@ -343,9 +344,10 @@ function geminiSection(hasKey: boolean): HTMLElement {
     try {
       await Bridge.secretSet("gemini-api-key", value);
       field.value = "";
-      settings.model = model.value || "gemini-3.8-flash";
+      settings.model = model.value || "gemini-2.0-flash";
       await save();
-      feedback.append(h("div", { class: "notice ok", text: "Saved. Gemini 3.8 is active for chat." }));
+      const modelLabel = model.selectedOptions[0]?.text || "Gemini";
+      feedback.append(h("div", { class: "notice ok", text: `Saved. ${modelLabel} is active for chat.` }));
       await refresh();
       updateProviderBadges();
     } catch (err) {
@@ -386,6 +388,376 @@ function geminiSection(hasKey: boolean): HTMLElement {
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
     feedback,
   );
+}
+
+// ── Mochi's Memory & User Profile section ────────────────────────────────────
+
+function formatDate(ts: string): string {
+  const num = Number(ts);
+  if (!num || isNaN(num)) return "Recently";
+  const date = new Date(num > 1e11 ? num : num * 1000);
+  const now = Date.now();
+  const diffSec = Math.floor((now - date.getTime()) / 1000);
+  if (diffSec < 60) return "Just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function memorySection(profile: UserProfile): HTMLElement {
+  let currentProfile: UserProfile = { ...profile };
+
+  const nameVal = h("span", { class: "memory-stat-val", text: currentProfile.name || "Not configured" });
+  const countVal = h("span", {
+    class: "memory-stat-val",
+    text: `${currentProfile.facts.length} ${currentProfile.facts.length === 1 ? "fact" : "facts"}`,
+  });
+  const updatedVal = h("span", {
+    class: "memory-stat-val",
+    text: formatDate(currentProfile.updatedAt),
+  });
+
+  const countBadge = h("span", {
+    class: "badge-active",
+    style: "background:rgba(168,85,247,0.15);color:#d8b4fe;border-color:rgba(168,85,247,0.3)",
+    text: `${currentProfile.facts.length} memories`,
+  });
+
+  const openBtn = h("button", {
+    class: "primary",
+    style: "display:inline-flex;align-items:center;gap:6px",
+  }, svg(ICONS.sparkles, 13), h("span", { text: "Open Memory Manager…" }));
+
+  const section = h(
+    "section",
+    {},
+    h("h2", {}, dot("#a855f7", 8), h("span", { text: "Mochi's Memory & User Profile" }), countBadge),
+    h("div", {
+      class: "hint",
+      text: "Mochi continuously learns your identity, preferences, and interests to personalize answers. This long-term memory stays saved on your PC even when you clear chat history.",
+    }),
+    h("div", { class: "memory-summary-row" },
+      h("div", { class: "memory-stat" }, h("span", { class: "memory-stat-label", text: "User Name" }), nameVal),
+      h("div", { class: "memory-stat" }, h("span", { class: "memory-stat-label", text: "Learned Facts" }), countVal),
+      h("div", { class: "memory-stat" }, h("span", { class: "memory-stat-label", text: "Last Updated" }), updatedVal),
+      openBtn,
+    ),
+  );
+
+  openBtn.addEventListener("click", () => {
+    openMemoryModal(currentProfile, (updated) => {
+      currentProfile = updated;
+      nameVal.textContent = currentProfile.name || "Not configured";
+      countVal.textContent = `${currentProfile.facts.length} ${currentProfile.facts.length === 1 ? "fact" : "facts"}`;
+      updatedVal.textContent = formatDate(currentProfile.updatedAt);
+      countBadge.textContent = `${currentProfile.facts.length} memories`;
+    });
+  });
+
+  return section;
+}
+
+function openMemoryModal(
+  profile: UserProfile,
+  onUpdate: (updated: UserProfile) => void,
+) {
+  let workingProfile: UserProfile = { ...profile, facts: [...profile.facts] };
+  let selectedCategory = "all";
+  let searchQuery = "";
+
+  const backdrop = h("div", { class: "modal-backdrop" });
+  const closeBtn = h("button", { class: "modal-close-btn", title: "Close (Esc)" }, svg(ICONS.xmark, 14));
+  const feedback = h("div", { style: "display:flex;flex-direction:column;gap:6px;padding:0 18px" });
+
+  const modal = h(
+    "div",
+    { class: "modal-window" },
+    h(
+      "div",
+      { class: "modal-header" },
+      h("h2", {}, dot("#a855f7", 8), svg(ICONS.sparkles, 14), h("span", { text: "Mochi's Memory & User Profile" })),
+      closeBtn,
+    ),
+    feedback,
+  );
+
+  const body = h("div", { class: "modal-body" });
+  modal.append(body);
+  backdrop.append(modal);
+  document.body.append(backdrop);
+
+  function close() {
+    backdrop.classList.remove("open");
+    window.removeEventListener("keydown", onKeyDown);
+    setTimeout(() => backdrop.remove(), 200);
+  }
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  }
+
+  window.addEventListener("keydown", onKeyDown);
+  closeBtn.addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+
+  requestAnimationFrame(() => backdrop.classList.add("open"));
+
+  function notifyUpdated() {
+    onUpdate(workingProfile);
+  }
+
+  // 1. Profile Info Card (Name & Instructions/Notes)
+  const nameInput = h("input", {
+    type: "text",
+    placeholder: "Your name (e.g. Dylen)",
+    value: workingProfile.name || "",
+  }) as HTMLInputElement;
+
+  const notesInput = h("textarea", {
+    class: "memory-textarea",
+    placeholder: "General notes or instructions Mochi should always remember (e.g. Keep answers concise, my PC cooling fan is broken so avoid heavy tasks, favorite team is Lakers)...",
+  }) as HTMLTextAreaElement;
+  notesInput.value = workingProfile.notes || "";
+
+  const saveProfileBtn = h("button", { class: "primary", text: "Save Profile Details" });
+  saveProfileBtn.addEventListener("click", async () => {
+    saveProfileBtn.disabled = true;
+    clear(feedback);
+    try {
+      workingProfile.name = nameInput.value.trim();
+      workingProfile.notes = notesInput.value.trim();
+      workingProfile.updatedAt = String(Math.floor(Date.now() / 1000));
+      await Bridge.profileSave(workingProfile);
+      feedback.append(h("div", { class: "notice ok", text: "Profile details saved successfully!" }));
+      notifyUpdated();
+      setTimeout(() => clear(feedback), 3000);
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Failed to save profile: ${String(err)}` }));
+    } finally {
+      saveProfileBtn.disabled = false;
+    }
+  });
+
+  const profileCard = h(
+    "div",
+    { class: "profile-card" },
+    h("h3", {}, h("span", { text: "User Profile & Custom Notes" })),
+    h("div", { class: "row" }, h("label", { text: "Your Name" }), nameInput),
+    h("div", { style: "display:flex;flex-direction:column;gap:6px" },
+      h("label", { style: "color:var(--dim);font-size:12px", text: "Permanent Notes & Context" }),
+      notesInput,
+    ),
+    h("div", { class: "row", style: "justify-content:flex-end" }, saveProfileBtn),
+  );
+
+  // 2. Learned Facts Explorer Card
+  const factsListContainer = h("div", { class: "facts-container" });
+  const searchInput = h("input", {
+    type: "text",
+    class: "search-input",
+    placeholder: "Search memories…",
+  }) as HTMLInputElement;
+
+  searchInput.addEventListener("input", () => {
+    searchQuery = searchInput.value.toLowerCase().trim();
+    renderFacts();
+  });
+
+  const categories = [
+    { id: "all", label: "All" },
+    { id: "identity", label: "Identity" },
+    { id: "preference", label: "Preferences" },
+    { id: "interest", label: "Interests" },
+    { id: "note", label: "Notes" },
+  ];
+
+  const filterBar = h("div", { class: "filter-bar" });
+
+  function renderFilterTabs() {
+    clear(filterBar);
+    for (const cat of categories) {
+      const count = cat.id === "all"
+        ? workingProfile.facts.length
+        : workingProfile.facts.filter((f) => f.category === cat.id).length;
+      const pill = h("button", {
+        class: selectedCategory === cat.id ? "filter-pill active" : "filter-pill",
+        text: `${cat.label} (${count})`,
+      });
+      pill.addEventListener("click", () => {
+        selectedCategory = cat.id;
+        renderFilterTabs();
+        renderFacts();
+      });
+      filterBar.append(pill);
+    }
+    filterBar.append(searchInput);
+  }
+
+  function renderFacts() {
+    clear(factsListContainer);
+    let filtered = workingProfile.facts;
+    if (selectedCategory !== "all") {
+      filtered = filtered.filter((f) => f.category === selectedCategory);
+    }
+    if (searchQuery) {
+      filtered = filtered.filter((f) => f.text.toLowerCase().includes(searchQuery));
+    }
+
+    if (filtered.length === 0) {
+      factsListContainer.append(h("div", {
+        class: "empty-state",
+        text: workingProfile.facts.length === 0
+          ? "Mochi has not learned any facts yet. She stores details automatically as you chat, or you can add one manually below!"
+          : "No memories match your filter search.",
+      }));
+      return;
+    }
+
+    for (const fact of filtered) {
+      const badgeCls = `fact-badge ${fact.category || "preference"}`;
+      const delBtn = h("button", { class: "fact-del-btn", title: "Forget this fact" }, svg(ICONS.trash, 12));
+
+      delBtn.addEventListener("click", async () => {
+        delBtn.disabled = true;
+        try {
+          const updated = await Bridge.profileFactDelete(fact.id);
+          if (updated) {
+            workingProfile = updated;
+          } else {
+            workingProfile.facts = workingProfile.facts.filter((f) => f.id !== fact.id);
+          }
+          notifyUpdated();
+          renderFilterTabs();
+          renderFacts();
+        } catch (err) {
+          feedback.append(h("div", { class: "notice err", text: `Could not delete memory: ${String(err)}` }));
+        }
+      });
+
+      const row = h(
+        "div",
+        { class: "fact-row" },
+        h("div", { class: "fact-content" },
+          h("div", { style: "display:flex;align-items:center;gap:8px" },
+            h("span", { class: badgeCls, text: fact.category }),
+            h("span", { class: "fact-date", text: formatDate(fact.updatedAt) }),
+          ),
+          h("span", { class: "fact-text", text: fact.text }),
+        ),
+        delBtn,
+      );
+      factsListContainer.append(row);
+    }
+  }
+
+  // 3. Add Fact Row
+  const newCatSelect = h("select", {},
+    h("option", { value: "preference", text: "Preference" }),
+    h("option", { value: "identity", text: "Identity" }),
+    h("option", { value: "interest", text: "Interest" }),
+    h("option", { value: "note", text: "Note" }),
+  ) as HTMLSelectElement;
+
+  const newFactInput = h("input", {
+    type: "text",
+    style: "flex:1 1 180px",
+    placeholder: "Teach Mochi a new fact (e.g. Favorite team is Lakers)…",
+  }) as HTMLInputElement;
+
+  const addFactBtn = h("button", { text: "+ Add Memory" });
+
+  async function submitNewFact() {
+    const text = newFactInput.value.trim();
+    if (!text) return;
+    addFactBtn.disabled = true;
+    clear(feedback);
+    try {
+      const updated = await Bridge.profileFactAdd(newCatSelect.value, text);
+      if (updated) workingProfile = updated;
+      newFactInput.value = "";
+      notifyUpdated();
+      renderFilterTabs();
+      renderFacts();
+      feedback.append(h("div", { class: "notice ok", text: "New memory stored!" }));
+      setTimeout(() => clear(feedback), 2500);
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Failed to add memory: ${String(err)}` }));
+    } finally {
+      addFactBtn.disabled = false;
+    }
+  }
+
+  addFactBtn.addEventListener("click", () => void submitNewFact());
+  newFactInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void submitNewFact();
+    }
+  });
+
+  const addRow = h(
+    "div",
+    { class: "row", style: "margin-top:6px" },
+    newCatSelect,
+    newFactInput,
+    addFactBtn,
+  );
+
+  const factsCard = h(
+    "div",
+    { class: "profile-card" },
+    h("h3", {}, h("span", { text: "Stored Facts & Preferences" })),
+    filterBar,
+    factsListContainer,
+    addRow,
+  );
+
+  // 4. Reset Memory Danger Row
+  const wipeBtn = h("button", { class: "danger", text: "Wipe Mochi's Memory…" });
+  wipeBtn.addEventListener("click", async () => {
+    const confirmed = confirm(
+      "Are you sure you want Mochi to forget all learned facts and user profile details? (Your chat history will stay untouched).",
+    );
+    if (!confirmed) return;
+    wipeBtn.disabled = true;
+    try {
+      await Bridge.profileClear();
+      workingProfile = {
+        name: "",
+        notes: "",
+        facts: [],
+        updatedAt: String(Math.floor(Date.now() / 1000)),
+      };
+      nameInput.value = "";
+      notesInput.value = "";
+      notifyUpdated();
+      renderFilterTabs();
+      renderFacts();
+      feedback.append(h("div", { class: "notice ok", text: "Mochi's memory has been wiped clean." }));
+      setTimeout(() => clear(feedback), 3000);
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Failed to wipe memory: ${String(err)}` }));
+    } finally {
+      wipeBtn.disabled = false;
+    }
+  });
+
+  const dangerCard = h(
+    "div",
+    { class: "row", style: "justify-content:space-between;border-top:1px solid var(--hairline);padding-top:12px;margin-top:4px" },
+    h("span", { class: "hint", text: "Reset Mochi's memory back to initial state." }),
+    wipeBtn,
+  );
+
+  renderFilterTabs();
+  renderFacts();
+
+  body.append(profileCard, factsCard, dangerCard);
 }
 
 // ── Integrations section ──────────────────────────────────────────────────────
@@ -573,12 +945,20 @@ async function main() {
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;
 
+  const userProfile = (await Bridge.profileGet()) ?? {
+    name: "",
+    notes: "",
+    facts: [],
+    updatedAt: "0",
+  };
+
   clear(root);
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
     apiSection(hasKey),
     geminiSection(hasGeminiKey),
+    memorySection(userProfile),
     integrationsSection(present),
     generalSection(),
     h("div", {

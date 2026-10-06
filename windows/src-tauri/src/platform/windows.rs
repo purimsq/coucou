@@ -275,3 +275,39 @@ pub fn set_activating(win: &WebviewWindow, activating: bool) {
 
 /// Click-through here is the poll's WS_EX_TRANSPARENT toggle, not a region.
 pub fn set_input_region(_win: &WebviewWindow, _rect: Option<(f64, f64, f64, f64)>) {}
+
+/// Eliminates Windows 11's default 2-3 minute "wait for idle" startup delay so
+/// Coucou appears immediately upon user sign-in.
+pub fn configure_autostart(enabled: bool) {
+    if enabled {
+        let _ = no_console(
+            Command::new("reg").args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize",
+                "/v",
+                "StartupDelayInMSec",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ]),
+        )
+        .status();
+
+        let _ = no_console(
+            Command::new("reg").args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize",
+                "/v",
+                "WaitForIdleState",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ]),
+        )
+        .status();
+    }
+}

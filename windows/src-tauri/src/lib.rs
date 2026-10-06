@@ -6,6 +6,7 @@ mod hooks;
 mod integrations;
 mod island;
 mod log;
+mod memory;
 mod pipe;
 mod platform;
 mod secrets;
@@ -24,6 +25,7 @@ use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
+use memory::{ChatMessageEntry, UserProfile};
 use pipe::Pending;
 use settings::Settings;
 
@@ -77,6 +79,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         if let Err(err) = result {
             eprintln!("[coucou] autostart: {err}");
         }
+        platform::configure_autostart(settings.autostart);
     }
     if screen_changed {
         let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
@@ -266,6 +269,42 @@ fn chat_reset(chat: State<Chat>) {
     chat.reset();
 }
 
+#[tauri::command]
+fn chat_load() -> Vec<ChatMessageEntry> {
+    memory::load_chat()
+}
+
+#[tauri::command]
+fn chat_clear(chat: State<Chat>) -> Result<(), String> {
+    chat.reset();
+    memory::clear_chat()
+}
+
+#[tauri::command]
+fn profile_get() -> UserProfile {
+    memory::load_profile()
+}
+
+#[tauri::command]
+fn profile_save(profile: UserProfile) -> Result<(), String> {
+    memory::save_profile(&profile)
+}
+
+#[tauri::command]
+fn profile_fact_add(category: String, text: String) -> Result<UserProfile, String> {
+    memory::add_or_update_fact(&category, &text)
+}
+
+#[tauri::command]
+fn profile_fact_delete(id: String) -> Result<UserProfile, String> {
+    memory::delete_fact(&id)
+}
+
+#[tauri::command]
+fn profile_clear() -> Result<(), String> {
+    memory::clear_profile()
+}
+
 /// Copies a dropped file into the inbox and reports its name back.
 #[tauri::command]
 fn ingest_file(path: String) -> Result<DroppedFile, String> {
@@ -379,6 +418,10 @@ pub fn run() {
     let loaded = settings::load();
     let gate = Arc::new(PollGate::new());
 
+    let chat = Chat::default();
+    let existing_chat = memory::load_chat();
+    chat.load_from_history(&existing_chat);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
@@ -389,7 +432,7 @@ pub fn run() {
             gate: gate.clone(),
         })
         .manage(Pending::default())
-        .manage(Chat::default())
+        .manage(chat)
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -409,6 +452,13 @@ pub fn run() {
             log_line,
             chat_send,
             chat_reset,
+            chat_load,
+            chat_clear,
+            profile_get,
+            profile_save,
+            profile_fact_add,
+            profile_fact_delete,
+            profile_clear,
             ingest_file,
             secret_present,
             secret_set,
@@ -442,6 +492,9 @@ pub fn run() {
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
+            if loaded.autostart {
+                platform::configure_autostart(true);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

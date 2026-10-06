@@ -38,6 +38,18 @@ function contextChip(label: string): HTMLElement {
 
 export function buildPrompt(onHeightChange: () => void): ViewHost {
   const chipRow = h("div", { class: "chip-row" });
+  const clearBtn = h(
+    "button",
+    {
+      class: "chat-clear-btn",
+      title: "Clear chat history (User profile & memory will stay saved)",
+      "aria-label": "Clear chat",
+    },
+    svg(ICONS.trash, 11),
+    h("span", { text: "Clear" }),
+  );
+  const headerRow = h("div", { class: "chat-header-row" }, chipRow, clearBtn);
+
   const log = h("div", { class: "chat-log" });
   const input = h("input", {
     type: "text",
@@ -51,12 +63,32 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   const el = h(
     "div",
     { class: "view" },
-    h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, chipRow, log, bar)),
+    h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, headerRow, log, bar)),
   );
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
 
   let sending = false;
   let renderedCount = -1;
+
+  async function clearChat() {
+    if (sending || State.chatHistory.length === 0) return;
+    try {
+      await Bridge.chatClear();
+    } catch (err) {
+      console.error("[coucou] failed to clear chat on disk", err);
+    }
+    State.chatHistory = [];
+    State.droppedFile = null;
+    renderedCount = -1;
+    clear(log);
+    Sound.play("pop");
+    State.notify();
+    onHeightChange();
+    input.placeholder = "Ask me anything…";
+    input.focus();
+  }
+
+  clearBtn.addEventListener("click", () => void clearChat());
 
   async function submit() {
     const query = input.value.trim();
@@ -65,6 +97,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     sending = true;
     Sound.play("send");
 
+    const maxId = State.chatHistory.reduce((max, m) => Math.max(max, m.id), 0);
+    if (maxId >= nextId) nextId = maxId + 1;
+
     State.chatHistory.push({ id: nextId++, role: "user", content: query });
     State.stateOverride = "thinking";
     State.notify();
@@ -72,14 +107,17 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
     const file = State.droppedFile;
     const context: ChatContext | null =
-      State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
+      file ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
       const reply = await Bridge.chatSend(query, context);
       State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+      State.droppedFile = null;
       State.stateOverride = null;
       Sound.play("finish");
     } catch (err) {
+      State.chatHistory.pop();
+      input.value = query;
       State.stateOverride = null;
       State.noteMessage = String(err).replace(/^Error:\s*/, "");
       State.view = "note";
@@ -111,6 +149,10 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         clear(chipRow);
         if (wantChip) chipRow.append(contextChip(wantChip));
       }
+
+      const hasHistory = State.chatHistory.length > 0;
+      clearBtn.style.opacity = hasHistory ? "1" : "0";
+      clearBtn.style.pointerEvents = hasHistory ? "auto" : "none";
 
       const thinking = State.stateOverride === "thinking";
       const count = State.chatHistory.length + (thinking ? 0.5 : 0);

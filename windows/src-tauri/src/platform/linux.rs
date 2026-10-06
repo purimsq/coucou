@@ -307,6 +307,8 @@ fn apply_input_region(gw: &impl IsA<gtk::Widget>, rect: Region) {
     }
 }
 
+pub fn configure_autostart(_enabled: bool) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

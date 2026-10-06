@@ -85,6 +85,17 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
+  chatLoad: () => call<ChatMessageEntry[]>("chat_load"),
+  chatClear: () => callOrThrow<void>("chat_clear"),
+
+  // ── Mochi's Long-Term Memory & User Profile ───────────────────────────────
+  profileGet: () => call<UserProfile>("profile_get"),
+  profileSave: (profile: UserProfile) => callOrThrow<void>("profile_save", { profile }),
+  profileFactAdd: (category: string, text: string) =>
+    callOrThrow<UserProfile>("profile_fact_add", { category, text }),
+  profileFactDelete: (id: string) => callOrThrow<UserProfile>("profile_fact_delete", { id }),
+  profileClear: () => callOrThrow<void>("profile_clear"),
+
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
@@ -111,6 +122,26 @@ export interface IntegrationUpdate {
 export type ChatContext =
   | { kind: "file"; name: string; path: string }
   | { kind: "window"; appName: string; title: string; url?: string };
+
+export interface ChatMessageEntry {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface MemoryFact {
+  id: string;
+  category: "identity" | "preference" | "interest" | "note";
+  text: string;
+  updatedAt: string;
+}
+
+export interface UserProfile {
+  name: string;
+  notes: string;
+  facts: MemoryFact[];
+  updatedAt: string;
+}
 
 export interface DroppedFile {
   name: string;

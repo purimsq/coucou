@@ -22,6 +22,21 @@ async function main() {
   }
   island.applySettings();
   State.loadIntegrationTasks();
+
+  try {
+    const savedChat = await Bridge.chatLoad();
+    if (savedChat && savedChat.length > 0) {
+      State.chatHistory = savedChat.map((m, idx) => ({
+        id: m.id || idx + 1,
+        role: m.role,
+        content: m.content,
+      }));
+      State.notify();
+    }
+  } catch (err) {
+    console.error("[coucou] failed to load chat history:", err);
+  }
+
   if (boot && !boot.cursorPoll) island.followPageCursor();
 
   await onEvent<{ x: number; y: number }>("cursor", ({ x, y }) => island.onCursor(x, y));
