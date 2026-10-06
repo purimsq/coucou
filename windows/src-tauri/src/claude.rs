@@ -25,10 +25,7 @@ const MAX_INLINE_TEXT: u64 = 200_000;
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 
-const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
-You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
-Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
-No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
+const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen in Coucou.";
 
 fn day_of_week(y: u32, m: u32, d: u32) -> &'static str {
     let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
@@ -62,26 +59,25 @@ pub fn system_prompt() -> String {
     let mem = crate::memory::format_memory_for_prompt();
 
     let temporal_ctx = format!(
-        "CURRENT TEMPORAL & LOCATION CONTEXT:\n\
-         • Current Year: 2026 (exact system year: {})\n\
-         • Current Date: {}\n\
-         • Current Time: {} (local PC clock)\n\
-         • User Location: Nairobi, Kenya (Timezone: East Africa Time, EAT / UTC+3)\n\n\
-         CRITICAL TEMPORAL, GROUNDING & MEMORY INSTRUCTIONS:\n\
-         1. The current year is 2026. Do NOT assume it is 2023 or 2024. Any events from 2023, 2024, or 2025 are in the past.\n\
-         2. The user is located in Nairobi, Kenya. Tailor location, weather, and time references to Nairobi accordingly.\n\
-         3. You have real-time live internet grounding and web search access. When answering questions regarding recent sports seasons, current scores, schedules, or events, rely on live web grounding results.\n\
-         4. Permanent Memory & Profile: You have a permanent long-term memory system and user profile on this PC. Whenever the user shares information about themselves (their name, interests, hobbies, favorite teams, work, preferences, guidelines) or asks you to remember something, you MUST save it by appending a memory tag at the very end of your response:\n\
-            <remember category=\"preference\">fact to remember</remember>\n\
-            (Categories: identity, preference, interest, note). Coucou will automatically extract and save it to your permanent memory, and display a 'Memory updated' pill to the user.\n\
-         5. Be helpful, concise, and friendly. Plain text only (no markdown *, #, or bullets).",
-        lt.year, date_str, time_str
+        "You are Mochi, a warm, helpful, and concise AI companion living on the user's screen in Coucou.\n\
+         Current date: {}.\n\
+         Current time: {} (local PC clock).\n\
+         User location: Nairobi, Kenya (Timezone: EAT / UTC+3).\n\
+         Current year: {}.\n\n\
+         Core instructions:\n\
+         • Speak naturally and directly as Mochi. Never refer to yourself as 'the system', never say 'in the process of being confirmed' or 'waiting for confirmation', and never mention internal system processing.\n\
+         • Today is in October 2026. The upcoming NBA season is the 2026-2027 season (starting October 2026). The 2025-2026 NBA season ended in June 2026.\n\
+         • You have live web search capabilities. When live search findings are provided below, answer directly using those facts.\n\
+         • Plain text only (no markdown *, #, or bullets). Keep responses crisp, natural, and helpful.\n\
+         • Long-term memory: When the user shares personal details (name, preferences, interests, favorite teams) or asks you to remember something, append at the end:\n\
+           <remember category=\"preference\">fact to remember</remember>",
+        date_str, time_str, lt.year
     );
 
     if mem.is_empty() {
-        format!("{SYSTEM_PROMPT}\n\n{temporal_ctx}")
+        temporal_ctx
     } else {
-        format!("{SYSTEM_PROMPT}\n\n{temporal_ctx}\n\nUSER PROFILE & MEMORY:\n{mem}")
+        format!("{temporal_ctx}\n\nRemembered facts about user:\n{mem}")
     }
 }
 
@@ -249,32 +245,16 @@ pub async fn perform_web_search(query: &str) -> Vec<SearchItem> {
 }
 
 pub fn format_grounding_system_context(search_query: &str, search_items: &[SearchItem]) -> String {
-    let mut block = String::from(
-        "\n\n======================================================\n\
-         [REAL-TIME WEB GROUNDING ENGINE — LIVE SEARCH FINDINGS]\n\
-         ======================================================\n\
-         The system performed a live web search for: \""
-    );
-    block.push_str(search_query);
-    block.push_str("\".\nHere are the live, authoritative sources and excerpts retrieved:\n\n");
-
+    let mut block = String::from("\n\nLive web search findings:\n");
     for (i, item) in search_items.iter().enumerate() {
         block.push_str(&format!(
-            "--- SOURCE [{}] ---\nTitle: {}\nSnippet: {}\n\n",
-            i + 1, item.title, item.snippet
+            "[{}] {}: {}\n",
+            i + 1, item.title.trim(), item.snippet.trim()
         ));
     }
-
     block.push_str(
-        "CRITICAL GROUNDING SYNTHESIS INSTRUCTIONS (HOW TO REPLY):\n\
-         1. COMPREHEND & REASON: Read through the retrieved sources above carefully. Digest the actual facts, dates, scores, and context.\n\
-         2. SYNTHESIZE AN ORIGINAL RESPONSE: Do NOT just paste, copy, or dump raw search snippets. Instead, write a thoughtful, natural, and comprehensive reply in Mochi's personal voice, answering the user's question directly based on what you learned.\n\
-         3. QUOTE EXACT FACTS & SPECIFIC DETAILS: Quote or state exact dates, game scores, team names, or quotes from the search findings to give an authoritative and precise answer.\n\
-         4. TEMPORAL ACCURACY: Remember that the current year is 2026. Explain the current status, schedule, or history accurately for 2026 without referencing outdated 2023/2024 information as 'current'.\n\
-         5. NO ROBOTIC META-COMMENTARY: Avoid starting with robotic phrases like 'According to search result 1' or 'Based on web results'. Just answer naturally and authoritatively like an AI assistant with live knowledge.\n\
-         ======================================================\n"
+        "\nInstruction: Answer the user's question directly using the search findings above. Speak naturally as Mochi. Never say 'the system performed a search', never say 'waiting for confirmation', and never output search metadata. Just answer directly in plain conversational text."
     );
-
     block
 }
 
@@ -506,7 +486,7 @@ async fn send_gemini(
     if should_search_web(&query) {
         let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
         let search_query = if !query.contains("202") && (query.to_lowercase().contains("season") || query.to_lowercase().contains("nba") || query.to_lowercase().contains("winner") || query.to_lowercase().contains("champion") || query.to_lowercase().contains("score")) {
-            format!("{query} 2025-2026")
+            format!("{query} 2026")
         } else {
             query.clone()
         };
@@ -514,7 +494,6 @@ async fn send_gemini(
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
             grounding_block = Some(format_grounding_system_context(&query, &search_items));
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
 
@@ -1147,7 +1126,7 @@ async fn send_local(
     if should_search_web(&query) {
         let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
         let search_query = if !query.contains("202") && (query.to_lowercase().contains("season") || query.to_lowercase().contains("nba") || query.to_lowercase().contains("winner") || query.to_lowercase().contains("champion") || query.to_lowercase().contains("score")) {
-            format!("{query} 2025-2026")
+            format!("{query} 2026")
         } else {
             query.clone()
         };
@@ -1155,7 +1134,6 @@ async fn send_local(
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
             grounding_block = Some(format_grounding_system_context(&query, &search_items));
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
 
@@ -1352,7 +1330,7 @@ async fn send_anthropic(
     if should_search_web(&query) {
         let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
         let search_query = if !query.contains("202") && (query.to_lowercase().contains("season") || query.to_lowercase().contains("nba") || query.to_lowercase().contains("winner") || query.to_lowercase().contains("champion") || query.to_lowercase().contains("score")) {
-            format!("{query} 2025-2026")
+            format!("{query} 2026")
         } else {
             query.clone()
         };
@@ -1360,7 +1338,6 @@ async fn send_anthropic(
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
             grounding_block = Some(format_grounding_system_context(&query, &search_items));
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
 

@@ -40,7 +40,8 @@ function bubble(message: ChatMessage): HTMLElement {
     );
     replyEl.append(badge);
   }
-  replyEl.append(document.createTextNode(message.content));
+  const textEl = h("div", { class: "reply-text", text: message.content });
+  replyEl.append(textEl);
 
   if (message.memoryUpdated) {
     const pill = h(
@@ -67,7 +68,7 @@ function statusRow(status: ChatStatusPayload): HTMLElement {
 
   const isPulse = status.status === "searching" || isThinking;
   const text = h("span", {
-    class: `chat-status-text ${isPulse ? "pulse" : ""}`,
+    class: `chat-status-text ${isPulse ? "status-pulse" : ""}`,
     text: status.detail,
   });
   bubble.append(text);
@@ -180,13 +181,17 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
           activeReplyEl.append(badge);
         }
 
+        const textEl = h("div", { class: "reply-text" });
+        activeReplyEl.append(textEl);
+
         activeReplyRow = h("div", { class: "chat-row" }, activeReplyEl);
         log.append(activeReplyRow);
       }
 
-      // Append token smoothly with fade-in animation
+      // Append token smoothly into .reply-text container
+      const textContainer = (activeReplyEl.querySelector(".reply-text") as HTMLElement) ?? activeReplyEl;
       const tokenSpan = h("span", { class: "token-fade", text: payload.token });
-      activeReplyEl.append(tokenSpan);
+      textContainer.append(tokenSpan);
       streamedContent += payload.token;
       log.scrollTop = log.scrollHeight;
       onHeightChange();

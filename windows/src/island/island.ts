@@ -869,6 +869,7 @@ export class Island {
     // Compact mini grid
     const showGrid = State.mode === "compact";
     this.miniGrid.style.opacity = showGrid ? "1" : "0";
+    this.miniGrid.style.display = showGrid ? "grid" : "none";
     if (showGrid) {
       const others = State.otherTasks.slice(0, 4);
       const key = others.map((t) => t.id).join("|");
