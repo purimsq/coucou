@@ -101,7 +101,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoCloseInterval: 15,
   absenceInterval: 180,
   activeIntegrations: [
-    "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
+    "integration_sports", "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
   ],
   screen: "primary",
   autostart: false,

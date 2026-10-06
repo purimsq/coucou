@@ -383,7 +383,57 @@ async fn send_gemini(
     Ok(ChatReply { text: cleaned_reply })
 }
 
+static LLAMA_SERVER_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+pub fn stop_local_engine() {
+    let mut lock = LLAMA_SERVER_CHILD.lock().unwrap();
+    if let Some(mut child) = lock.take() {
+        let _ = child.kill();
+    }
+}
+
+fn scan_ollama_manifests(dir: &std::path::Path, out: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan_ollama_manifests(&path, out);
+            } else if path.is_file() {
+                if let (Some(tag), Some(model)) = (
+                    path.file_name().and_then(|f| f.to_str()),
+                    path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()),
+                ) {
+                    let formatted = if tag == "latest" {
+                        format!("ollama:{model}")
+                    } else {
+                        format!("ollama:{model}:{tag}")
+                    };
+                    if !out.contains(&formatted) {
+                        out.push(formatted);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn test_local_server(custom_url: Option<&str>) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+
+    // 1. Scan Coucou Native GGUF models in %LOCALAPPDATA%\Coucou\models
+    let models_dir = crate::settings::models_dir();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map(|e| e == "gguf").unwrap_or(false) {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    found.push(format!("coucou:{stem}"));
+                }
+            }
+        }
+    }
+
+    // 2. Query Ollama /api/tags if running or accessible
     let endpoint = match custom_url {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => secrets::get("local-model-url").unwrap_or_else(|| "http://127.0.0.1:11434".to_string()),
@@ -391,52 +441,55 @@ pub async fn test_local_server(custom_url: Option<&str>) -> Result<Vec<String>, 
     let endpoint = endpoint.trim_end_matches('/');
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(6))
+        .timeout(std::time::Duration::from_millis(1500))
         .build()
         .map_err(|e| e.to_string())?;
 
-    // 1. Try Ollama native /api/tags
     let tags_url = format!("{endpoint}/api/tags");
     if let Ok(res) = client.get(&tags_url).send().await {
         if res.status().is_success() {
             if let Ok(json) = res.json::<Value>().await {
                 if let Some(models) = json.get("models").and_then(Value::as_array) {
-                    let names: Vec<String> = models
-                        .iter()
-                        .filter_map(|m| m.get("name").and_then(Value::as_str).map(str::to_string))
-                        .collect();
-                    return Ok(names);
+                    for m in models {
+                        if let Some(name) = m.get("name").and_then(Value::as_str) {
+                            let tag = format!("ollama:{name}");
+                            if !found.contains(&tag) {
+                                found.push(tag);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    // 2. Try OpenAI compatible /v1/models (works for LM Studio, LocalAI, vLLM, etc.)
+    // 3. If Ollama service is stopped, detect any models stored on disk in %USERPROFILE%\.ollama
+    let user_home = crate::platform::home_dir();
+    let ollama_manifests = user_home.join(".ollama").join("models").join("manifests");
+    if ollama_manifests.exists() {
+        scan_ollama_manifests(&ollama_manifests, &mut found);
+    }
+
+    // 4. Try OpenAI-compatible /v1/models (LM Studio, LocalAI, vLLM)
     let models_url = format!("{endpoint}/v1/models");
-    match client.get(&models_url).send().await {
-        Ok(res) if res.status().is_success() => {
+    if let Ok(res) = client.get(&models_url).send().await {
+        if res.status().is_success() {
             if let Ok(json) = res.json::<Value>().await {
                 if let Some(data) = json.get("data").and_then(Value::as_array) {
-                    let names: Vec<String> = data
-                        .iter()
-                        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
-                        .collect();
-                    return Ok(names);
+                    for item in data {
+                        if let Some(id) = item.get("id").and_then(Value::as_str) {
+                            let tag = format!("openai:{id}");
+                            if !found.contains(&tag) {
+                                found.push(tag);
+                            }
+                        }
+                    }
                 }
-            }
-            Ok(vec![])
-        }
-        Ok(res) => Err(format!("Server returned HTTP {}", res.status())),
-        Err(e) => {
-            if e.is_connect() {
-                Err(format!("Could not connect to {endpoint}. Is Ollama or LM Studio running?"))
-            } else if e.is_timeout() {
-                Err(format!("Connection to {endpoint} timed out."))
-            } else {
-                Err(e.to_string())
             }
         }
     }
+
+    Ok(found)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,95 +506,62 @@ pub struct DownloadProgressPayload {
 pub async fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
     use tauri::Emitter;
 
-    // Check if Ollama is already installed on Windows
-    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let installed_ollama_path = std::path::PathBuf::from(&local_app_data)
-        .join("Programs")
-        .join("Ollama")
-        .join("ollama.exe");
-
-    if installed_ollama_path.exists() {
-        let _ = std::process::Command::new("cmd")
-            .args(&["/C", "start", "", installed_ollama_path.to_string_lossy().as_ref(), "serve"])
-            .spawn();
+    let server_path = crate::settings::llama_server_path();
+    if server_path.exists() {
         let _ = app.emit("local-download-progress", DownloadProgressPayload {
             kind: "engine".to_string(),
-            status: "Ollama is already installed! Server started.".to_string(),
+            status: "Coucou Native Engine (llama-server) is already installed and ready!".to_string(),
             completed: 100,
             total: 100,
             percent: 100.0,
             done: true,
             error: None,
         });
-        return Ok("Ollama is already installed! Server started.".to_string());
+        return Ok("Coucou Native Engine (llama-server) is already installed!".to_string());
     }
 
     let _ = app.emit("local-download-progress", DownloadProgressPayload {
         kind: "engine".to_string(),
-        status: "Connecting to Ollama download server…".to_string(),
+        status: "Connecting to download Coucou Native Engine (18.5 MB)…".to_string(),
         completed: 0,
-        total: 0,
+        total: 19_399_521,
         percent: 0.0,
         done: false,
         error: None,
     });
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(1800))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let installer_url = "https://ollama.com/download/OllamaSetup.exe";
-    let mut res = match client.get(installer_url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => {
-            // Fallback to winget if direct download cannot be started
-            let _ = app.emit("local-download-progress", DownloadProgressPayload {
-                kind: "engine".to_string(),
-                status: "Direct download unavailable, attempting winget install…".to_string(),
-                completed: 50,
-                total: 100,
-                percent: 50.0,
-                done: false,
-                error: None,
-            });
-            return tauri::async_runtime::spawn_blocking(|| {
-                let output = std::process::Command::new("winget")
-                    .args(&["install", "Ollama.Ollama", "--accept-source-agreements", "--accept-package-agreements", "--silent"])
-                    .output()
-                    .map_err(|e| format!("Could not run winget: {e}"))?;
-                if output.status.success() {
-                    let _ = std::process::Command::new("cmd").args(&["/C", "start", "ollama", "serve"]).spawn();
-                    Ok("Ollama installed successfully via winget!".to_string())
-                } else {
-                    let combined = format!("{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)).trim().to_string();
-                    if combined.contains("already installed") {
-                        let _ = std::process::Command::new("cmd").args(&["/C", "start", "ollama", "serve"]).spawn();
-                        Ok("Ollama was already installed. Starting local server…".to_string())
-                    } else {
-                        Err(format!("Installation failed: {combined}"))
-                    }
-                }
-            }).await.map_err(|e| e.to_string())?;
-        }
-    };
+    // Official llama.cpp Windows AVX2 release (ultralight standalone CPU runner)
+    let url = "https://github.com/ggml-org/llama.cpp/releases/download/b11433/llama-b11433-bin-win-cpu-x64.zip";
+    let mut res = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach engine download URL: {e}"))?;
 
-    let total_bytes = res.content_length().unwrap_or(1_580_000_000);
-    let temp_dir = std::env::temp_dir();
-    let temp_installer = temp_dir.join("Coucou_OllamaSetup.exe");
+    if !res.status().is_success() {
+        return Err(format!("Download failed with HTTP {}", res.status()));
+    }
 
-    let mut file = std::fs::File::create(&temp_installer)
-        .map_err(|e| format!("Could not create temporary installer file: {e}"))?;
+    let total_bytes = res.content_length().unwrap_or(19_399_521);
+    let temp_zip = std::env::temp_dir().join("Coucou_llama_engine.zip");
+
+    let mut file = std::fs::File::create(&temp_zip)
+        .map_err(|e| format!("Could not create temporary file: {e}"))?;
 
     use std::io::Write;
     let mut downloaded: u64 = 0;
     let mut last_emit = std::time::Instant::now();
 
-    while let Some(chunk) = res.chunk().await.map_err(|e| format!("Installer download error: {e}"))? {
-        file.write_all(&chunk).map_err(|e| format!("Failed to write chunk: {e}"))?;
+    while let Some(chunk) = res.chunk().await.map_err(|e| format!("Download error: {e}"))? {
+        file.write_all(&chunk).map_err(|e| format!("Failed to write: {e}"))?;
         downloaded += chunk.len() as u64;
 
-        if last_emit.elapsed().as_millis() > 150 || downloaded >= total_bytes {
+        if last_emit.elapsed().as_millis() > 100 || downloaded >= total_bytes {
             last_emit = std::time::Instant::now();
             let percent = if total_bytes > 0 {
                 ((downloaded as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
@@ -550,7 +570,7 @@ pub async fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
             };
             let _ = app.emit("local-download-progress", DownloadProgressPayload {
                 kind: "engine".to_string(),
-                status: format!("Downloading Ollama installer ({:.0}%)…", percent),
+                status: format!("Downloading Coucou Engine ({:.0}%)…", percent),
                 completed: downloaded,
                 total: total_bytes,
                 percent,
@@ -563,7 +583,7 @@ pub async fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
 
     let _ = app.emit("local-download-progress", DownloadProgressPayload {
         kind: "engine".to_string(),
-        status: "Installing Ollama silently… (Please wait a moment)".to_string(),
+        status: "Extracting standalone engine into Coucou bin…".to_string(),
         completed: total_bytes,
         total: total_bytes,
         percent: 100.0,
@@ -571,123 +591,247 @@ pub async fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
         error: None,
     });
 
-    let installer_path_clone = temp_installer.clone();
-    let install_res = tauri::async_runtime::spawn_blocking(move || {
-        let output = std::process::Command::new(&installer_path_clone)
-            .args(&["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])
+    let bin_dir = crate::settings::local_dir().join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+
+    let temp_zip_clone = temp_zip.clone();
+    let bin_dir_clone = bin_dir.clone();
+    let extract_res = tauri::async_runtime::spawn_blocking(move || {
+        // Try bsdtar first
+        let tar_out = std::process::Command::new("tar")
+            .args(&["-xf", temp_zip_clone.to_string_lossy().as_ref(), "-C", bin_dir_clone.to_string_lossy().as_ref()])
             .output();
-        let _ = std::fs::remove_file(&installer_path_clone);
-        output
+
+        if let Ok(ref out) = tar_out {
+            if out.status.success() {
+                let _ = std::fs::remove_file(&temp_zip_clone);
+                return tar_out;
+            }
+        }
+
+        // Fallback to PowerShell Expand-Archive
+        let ps_cmd = format!(
+            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            temp_zip_clone.to_string_lossy(),
+            bin_dir_clone.to_string_lossy()
+        );
+        let ps_out = std::process::Command::new("powershell")
+            .args(&["-NoProfile", "-Command", &ps_cmd])
+            .output();
+
+        let _ = std::fs::remove_file(&temp_zip_clone);
+        ps_out
     }).await.map_err(|e| e.to_string())?;
 
-    match install_res {
+    match extract_res {
         Ok(out) if out.status.success() => {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            let _ = std::process::Command::new("cmd")
-                .args(&["/C", "start", "ollama", "serve"])
-                .spawn();
             let _ = app.emit("local-download-progress", DownloadProgressPayload {
                 kind: "engine".to_string(),
-                status: "Ollama successfully installed and server started!".to_string(),
+                status: "Coucou Native Engine (llama-server) installed successfully!".to_string(),
                 completed: total_bytes,
                 total: total_bytes,
                 percent: 100.0,
                 done: true,
                 error: None,
             });
-            Ok("Ollama successfully installed and server started!".to_string())
+            Ok("Coucou Native Engine (llama-server) installed successfully!".to_string())
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            Err(format!("Installer exited with error: {stderr}"))
+            Err(format!("Extraction error: {stderr}"))
         }
-        Err(e) => Err(format!("Could not run installer: {e}")),
+        Err(e) => Err(format!("Could not extract engine: {e}")),
     }
 }
 
 pub async fn pull_model(app: &tauri::AppHandle, model_name: String) -> Result<String, String> {
     use tauri::Emitter;
-    let endpoint = secrets::get("local-model-url")
-        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
-    let url = format!("{}/api/pull", endpoint.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(1800))
-        .build()
-        .map_err(|e| e.to_string())?;
 
-    let mut res = client
-        .post(&url)
-        .json(&serde_json::json!({ "name": model_name, "stream": true }))
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_connect() {
-                format!("Could not connect to {endpoint}. Is Ollama running?")
-            } else if e.is_timeout() {
-                "Model download timed out. Check your internet connection.".to_string()
-            } else {
-                format!("Download error: {e}")
-            }
-        })?;
+    let (filename, download_url, expected_size) = match model_name.to_lowercase().as_str() {
+        m if m.contains("qwen") && m.contains("0.5") => (
+            "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+            "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+            397_800_000u64,
+        ),
+        m if m.contains("3b") => (
+            "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            2_020_000_000u64,
+        ),
+        _ => (
+            "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            807_694_464u64,
+        ),
+    };
 
-    if !res.status().is_success() {
-        let code = res.status();
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("Download failed (HTTP {code}): {body}"));
-    }
+    let models_dir = crate::settings::models_dir();
+    std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+    let dest_file = models_dir.join(filename);
 
-    let mut buffer = String::new();
-    let mut last_emit = std::time::Instant::now();
-
-    while let Some(chunk) = res.chunk().await.map_err(|e| format!("Stream error: {e}"))? {
-        let chunk_str = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&chunk_str);
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim().to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                let status = v.get("status").and_then(Value::as_str).unwrap_or("Downloading…").to_string();
-                let completed = v.get("completed").and_then(Value::as_u64).unwrap_or(0);
-                let total = v.get("total").and_then(Value::as_u64).unwrap_or(0);
-                let percent = if total > 0 {
-                    ((completed as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
-                } else {
-                    0.0
-                };
-
-                if last_emit.elapsed().as_millis() > 100 || total == 0 || percent >= 100.0 {
-                    last_emit = std::time::Instant::now();
-                    let _ = app.emit("local-download-progress", DownloadProgressPayload {
-                        kind: "model".to_string(),
-                        status,
-                        completed,
-                        total,
-                        percent,
-                        done: false,
-                        error: None,
-                    });
-                }
+    // CRITICAL: Prevent downloading twice!
+    if dest_file.exists() {
+        if let Ok(meta) = std::fs::metadata(&dest_file) {
+            if meta.len() > 10_000_000 {
+                let _ = app.emit("local-download-progress", DownloadProgressPayload {
+                    kind: "model".to_string(),
+                    status: format!("Model '{filename}' is already downloaded and ready!"),
+                    completed: meta.len(),
+                    total: meta.len(),
+                    percent: 100.0,
+                    done: true,
+                    error: None,
+                });
+                return Ok(format!("Model '{filename}' is already downloaded in Coucou storage and ready!"));
             }
         }
     }
 
     let _ = app.emit("local-download-progress", DownloadProgressPayload {
         kind: "model".to_string(),
-        status: format!("Model '{model_name}' successfully downloaded!"),
-        completed: 100,
-        total: 100,
+        status: format!("Connecting to download '{filename}'…"),
+        completed: 0,
+        total: expected_size,
+        percent: 0.0,
+        done: false,
+        error: None,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut res = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach model download server: {e}"))?;
+
+    if !res.status().is_success() {
+        return Err(format!("Model download failed with HTTP {}", res.status()));
+    }
+
+    let total_bytes = res.content_length().unwrap_or(expected_size);
+    let mut file = std::fs::File::create(&dest_file)
+        .map_err(|e| format!("Could not create model destination file: {e}"))?;
+
+    use std::io::Write;
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+
+    while let Some(chunk) = res.chunk().await.map_err(|e| format!("Stream error: {e}"))? {
+        file.write_all(&chunk).map_err(|e| format!("Failed to write chunk: {e}"))?;
+        downloaded += chunk.len() as u64;
+
+        if last_emit.elapsed().as_millis() > 120 || downloaded >= total_bytes {
+            last_emit = std::time::Instant::now();
+            let percent = if total_bytes > 0 {
+                ((downloaded as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            let _ = app.emit("local-download-progress", DownloadProgressPayload {
+                kind: "model".to_string(),
+                status: format!("Downloading model weights ({:.0}%)…", percent),
+                completed: downloaded,
+                total: total_bytes,
+                percent,
+                done: false,
+                error: None,
+            });
+        }
+    }
+    drop(file);
+
+    let _ = app.emit("local-download-progress", DownloadProgressPayload {
+        kind: "model".to_string(),
+        status: format!("Model '{filename}' successfully downloaded and ready!"),
+        completed: total_bytes,
+        total: total_bytes,
         percent: 100.0,
         done: true,
         error: None,
     });
 
-    Ok(format!("Model '{model_name}' successfully downloaded and ready for Mochi!"))
+    Ok(format!("Model '{filename}' successfully downloaded and ready for Mochi!"))
+}
+
+async fn ensure_llama_server_running(model_tag: &str) -> Result<String, String> {
+    let server_exe = crate::settings::llama_server_path();
+    if !server_exe.exists() {
+        return Err("Coucou Native Engine (llama-server) is not installed. Open Settings and click '⚡ Install Coucou Engine'.".to_string());
+    }
+
+    let models_dir = crate::settings::models_dir();
+    let clean_tag = model_tag.strip_prefix("coucou:").unwrap_or(model_tag);
+    let mut model_file = None;
+
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem.eq_ignore_ascii_case(clean_tag) || clean_tag.contains(stem) || stem.contains(clean_tag) {
+                        model_file = Some(path);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let model_path = match model_file {
+        Some(p) => p,
+        None => {
+            if let Ok(mut entries) = std::fs::read_dir(&models_dir) {
+                if let Some(first) = entries.find_map(|e| e.ok().map(|e| e.path()).filter(|p| p.extension().map(|ext| ext == "gguf").unwrap_or(false))) {
+                    first
+                } else {
+                    return Err(format!("Model '{clean_tag}' not found in Coucou models. Open Settings and click '⬇️ Download Model'."));
+                }
+            } else {
+                return Err("No models found in Coucou models directory. Open Settings to download one.".to_string());
+            }
+        }
+    };
+
+    // Check if server is already responding
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(600)).build().unwrap_or_default();
+    if client.get("http://127.0.0.1:8080/health").send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+        return Ok("http://127.0.0.1:8080".to_string());
+    }
+
+    // Stop previous instance if any
+    stop_local_engine();
+
+    // Spawn llama-server with strict thermal protection (-t 2) and CPU mode (--n-gpu-layers 0)
+    let mut cmd = std::process::Command::new(&server_exe);
+    cmd.args(&[
+        "-m", model_path.to_string_lossy().as_ref(),
+        "--port", "8080",
+        "-t", "2",
+        "-c", "4096",
+        "--n-gpu-layers", "0",
+    ]);
+    #[cfg(windows)]
+    crate::platform::windows::no_console(&mut cmd);
+
+    let child = cmd.spawn().map_err(|e| format!("Failed to spawn llama-server: {e}"))?;
+    {
+        let mut lock = LLAMA_SERVER_CHILD.lock().unwrap();
+        *lock = Some(child);
+    }
+
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs() < 5 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        if client.get("http://127.0.0.1:8080/health").send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+            return Ok("http://127.0.0.1:8080".to_string());
+        }
+    }
+
+    Ok("http://127.0.0.1:8080".to_string())
 }
 
 async fn send_local(
@@ -696,8 +840,14 @@ async fn send_local(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let endpoint = secrets::get("local-model-url")
-        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+    let (endpoint, actual_model) = if model.starts_with("ollama:") {
+        let ep = secrets::get("local-model-url")
+            .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+        (ep, model.strip_prefix("ollama:").unwrap_or(model).to_string())
+    } else {
+        let ep = ensure_llama_server_running(model).await?;
+        (ep, model.strip_prefix("coucou:").unwrap_or(model).to_string())
+    };
     let endpoint = endpoint.trim_end_matches('/');
 
     let mut user_text = query.clone();
@@ -764,7 +914,7 @@ async fn send_local(
 
     // Attempt 1: OpenAI-compatible /v1/chat/completions (supported by Ollama, LM Studio, etc.)
     let body = json!({
-        "model": model,
+        "model": actual_model,
         "messages": messages,
         "temperature": 0.7,
     });

@@ -186,6 +186,7 @@ fn open_in_vscode(path: Option<String>) -> bool {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
+    claude::stop_local_engine();
     app.exit(0);
 }
 
@@ -515,6 +516,11 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Coucou");
+        .build(tauri::generate_context!())
+        .expect("error while building Coucou")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                claude::stop_local_engine();
+            }
+        });
 }

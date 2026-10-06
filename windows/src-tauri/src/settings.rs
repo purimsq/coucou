@@ -34,6 +34,7 @@ impl Default for Settings {
             auto_close_interval: 15.0,
             absence_interval: 180.0,
             active_integrations: vec![
+                "integration_sports".into(),
                 "integration_resend".into(),
                 "integration_n8n".into(),
                 "integration_vercel".into(),
@@ -51,6 +52,17 @@ pub use crate::platform::{config_dir, local_dir};
 
 pub fn hook_exe_path() -> PathBuf {
     local_dir().join("bin").join(crate::platform::HOOK_EXE)
+}
+
+pub fn llama_server_path() -> PathBuf {
+    #[cfg(windows)]
+    return local_dir().join("bin").join("llama-server.exe");
+    #[cfg(not(windows))]
+    return local_dir().join("bin").join("llama-server");
+}
+
+pub fn models_dir() -> PathBuf {
+    local_dir().join("models")
 }
 
 fn settings_path() -> PathBuf {

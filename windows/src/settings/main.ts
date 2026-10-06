@@ -395,37 +395,33 @@ function geminiSection(hasKey: boolean): HTMLElement {
 // ── Local Model (Offline / Ollama) section ────────────────────────────────────
 
 const DEFAULT_LOCAL_MODELS: [string, string][] = [
-  ["llama3.2", "Llama 3.2 3B (Recommended Meta)"],
-  ["llama3.2:1b", "Llama 3.2 1B (Ultralight Meta)"],
-  ["qwen2.5:0.5b", "Qwen 2.5 0.5B (Fastest)"],
-  ["qwen2.5:1.5b", "Qwen 2.5 1.5B (Alibaba)"],
-  ["qwen2.5:7b", "Qwen 2.5 7B (High Quality)"],
-  ["mistral", "Mistral 7B (Mistral AI)"],
-  ["deepseek-r1:1.5b", "DeepSeek R1 1.5B (Reasoning)"],
-  ["phi3", "Phi-3 Mini 3.8B (Microsoft)"],
+  ["coucou:llama-3.2-1b", "Llama 3.2 1B (Coucou Native Standalone • 770MB) ⭐"],
+  ["coucou:qwen-2.5-0.5b", "Qwen 2.5 0.5B (Coucou Native Standalone • 398MB)"],
+  ["coucou:llama-3.2-3b", "Llama 3.2 3B (Coucou Native Standalone • 2.0GB)"],
+  ["ollama:llama3.2:1b", "Llama 3.2 1B (Ollama Server)"],
+  ["ollama:llama3.2", "Llama 3.2 3B (Ollama Server)"],
+  ["ollama:qwen2.5:0.5b", "Qwen 2.5 0.5B (Ollama Server)"],
 ];
 
 function localModelSection(hasUrl: boolean): HTMLElement {
   const dot = statusDot(hasUrl);
   const state = h("span", {
     class: "hint",
-    text: hasUrl
-      ? "Local server configured. Run models privately on your PC without cloud keys."
-      : "Run offline models privately (Ollama, LM Studio) without API keys or data leaving your PC.",
+    text: "Run offline models privately with Coucou's standalone engine (llama-server) or your existing Ollama models.",
   });
   const activeBadge = h("span", { class: "badge-active", text: "Active" });
   const activateBtn = h("button", { class: "btn-activate", text: "Use for chat" });
 
   const urlInput = h("input", {
     type: "text",
-    placeholder: "http://127.0.0.1:11434",
+    placeholder: "http://127.0.0.1:11434 (Optional for Ollama)",
     style: "flex:1 1 auto;min-width:0",
     autocomplete: "off",
     spellcheck: "false",
   }) as HTMLInputElement;
 
   const saveUrlBtn = h("button", { text: "Save URL" });
-  const testBtn = h("button", { class: "primary", text: "Test & Fetch Models" });
+  const testBtn = h("button", { class: "primary", text: "Detect Models" });
   const pullBtn = h("button", { text: "⬇️ Download Model" });
   const feedback = h("div", {});
 
@@ -449,7 +445,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
 
   const customModelInput = h("input", {
     type: "text",
-    placeholder: "Or custom model tag (e.g. gemma2:2b, llama3.1:8b)…",
+    placeholder: "Or custom model (e.g. coucou:llama-3.2-1b, ollama:mistral)…",
     style: "flex:1 1 auto;min-width:0",
   }) as HTMLInputElement;
 
@@ -462,7 +458,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
   });
 
   activateBtn.addEventListener("click", () => {
-    const chosen = customModelInput.value.trim() || modelSelect.value || "llama3.2";
+    const chosen = customModelInput.value.trim() || modelSelect.value || "coucou:llama-3.2-1b";
     settings.model = `local:${chosen}`;
     void save();
     updateProviderBadges();
@@ -488,7 +484,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
   async function performTest() {
     testBtn.disabled = true;
     clear(feedback);
-    feedback.append(h("div", { class: "hint", text: "Connecting to local model server…" }));
+    feedback.append(h("div", { class: "hint", text: "Detecting models from Coucou storage & local servers…" }));
     const url = urlInput.value.trim() || undefined;
     try {
       const models = await Bridge.testLocalModel(url);
@@ -497,16 +493,23 @@ function localModelSection(hasUrl: boolean): HTMLElement {
       if (models && models.length > 0) {
         clear(modelSelect);
         for (const m of models) {
-          modelSelect.append(h("option", { value: m, text: `${m} (installed)` }));
+          const isCoucou = m.startsWith("coucou:");
+          const isOllama = m.startsWith("ollama:");
+          const label = isCoucou
+            ? `${m.slice(7)} (Coucou Native • Ready)`
+            : isOllama
+              ? `${m.slice(7)} (Ollama • Ready)`
+              : `${m} (Ready)`;
+          modelSelect.append(h("option", { value: m, text: label }));
         }
         feedback.append(h("div", {
           class: "notice ok",
-          text: `Connected! Detected ${models.length} installed model(s) on your local server.`,
+          text: `Ready! Detected ${models.length} model(s) across Coucou Native & Ollama.`,
         }));
       } else {
         feedback.append(h("div", {
           class: "notice ok",
-          text: "Connected to local server! (No downloaded models in catalog yet. Click '⬇️ Download Model' below to pull Llama 3.2 1B).",
+          text: "Coucou ready. No local models downloaded yet. Click '⬇️ Download Model' below to pull Llama 3.2 1B.",
         }));
       }
     } catch (err) {
@@ -515,12 +518,12 @@ function localModelSection(hasUrl: boolean): HTMLElement {
       feedback.append(
         h("div", {
           class: "notice warn",
-          text: `Could not connect: ${String(err).replace(/^Error:\s*/, "")}.`,
+          text: `Detection status: ${String(err).replace(/^Error:\s*/, "")}.`,
         }),
         h("div", {
           style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;align-items:center",
         },
-          h("span", { class: "hint", text: "First time setup:" }),
+          h("span", { class: "hint", text: "Coucou setup:" }),
           installEngineBtn,
           manualOllamaBtn,
           manualLMStudioBtn,
@@ -567,7 +570,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     const pct = Math.min(100, Math.max(0, p.percent || 0));
     progressFill.style.width = `${pct.toFixed(1)}%`;
     progressPercent.textContent = `${pct.toFixed(0)}%`;
-    progressStatus.textContent = p.status || (p.kind === "engine" ? "Downloading Ollama…" : "Downloading model weights…");
+    progressStatus.textContent = p.status || (p.kind === "engine" ? "Downloading Coucou Engine…" : "Downloading model weights…");
 
     if (p.total > 0) {
       progressDetails.textContent = `${formatBytes(p.completed)} / ${formatBytes(p.total)}`;
@@ -590,7 +593,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
   // 1-Click engine installer with progress
   const installEngineBtn = h("button", {
     class: "primary",
-    text: "⚡ Install Ollama (1-Click)",
+    text: "⚡ Install Coucou Engine (llama-server 18MB)",
   });
   installEngineBtn.addEventListener("click", async () => {
     installEngineBtn.disabled = true;
@@ -599,18 +602,18 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     progressFill.classList.remove("done");
     progressFill.style.width = "0%";
     progressPercent.textContent = "0%";
-    progressStatus.textContent = "Connecting to download Ollama installer…";
+    progressStatus.textContent = "Connecting to download Coucou Native Engine (18.5 MB)…";
     progressDetails.textContent = "";
 
     try {
       const res = await Bridge.installLocalEngine();
       feedback.append(h("div", { class: "notice ok", text: res || "Installed successfully!" }));
-      setTimeout(() => void performTest(), 2000);
+      setTimeout(() => void performTest(), 1500);
     } catch (err) {
       progressContainer.style.display = "none";
       feedback.append(h("div", {
         class: "notice err",
-        text: `Automated install failed: ${String(err)}. You can download it directly using the button below.`,
+        text: `Engine install error: ${String(err)}. You can also use Ollama.`,
       }));
     } finally {
       installEngineBtn.disabled = false;
@@ -627,22 +630,23 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     onclick: () => void Bridge.openUrl("https://lmstudio.ai"),
   });
 
-  // 1-Click model downloader with realtime streaming progress
+  // 1-Click model downloader with realtime streaming progress & duplicate prevention
   pullBtn.addEventListener("click", async () => {
-    const chosen = customModelInput.value.trim() || modelSelect.value || "llama3.2:1b";
+    const rawChoice = customModelInput.value.trim() || modelSelect.value || "coucou:llama-3.2-1b";
+    const chosen = rawChoice.startsWith("coucou:") ? rawChoice.slice(7) : rawChoice;
     pullBtn.disabled = true;
     clear(feedback);
     progressContainer.style.display = "flex";
     progressFill.classList.remove("done");
     progressFill.style.width = "0%";
     progressPercent.textContent = "0%";
-    progressStatus.textContent = `Connecting to pull '${chosen}'…`;
+    progressStatus.textContent = `Checking and pulling '${chosen}'…`;
     progressDetails.textContent = "";
 
     try {
       const res = await Bridge.pullLocalModel(chosen);
       feedback.append(h("div", { class: "notice ok", text: res }));
-      settings.model = `local:${chosen}`;
+      settings.model = `local:${rawChoice}`;
       await save();
       updateProviderBadges();
       setTimeout(() => void performTest(), 1500);
@@ -650,7 +654,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
       progressContainer.style.display = "none";
       feedback.append(h("div", {
         class: "notice err",
-        text: `Download error: ${String(err)}. Make sure your local server is running.`,
+        text: `Download error: ${String(err)}. Check your internet connection.`,
       }));
     } finally {
       pullBtn.disabled = false;
@@ -1088,7 +1092,7 @@ interface IntegrationDef {
 }
 
 const INTEGRATIONS: IntegrationDef[] = [
-  { id: "integration_sports", name: "Sports Scores", color: "#FF6B35",
+  { id: "integration_sports", name: "Sports Scores (Live Poller)", color: "#FF6B35",
     fields: [
       { key: "sports-sport", label: "Preferred sport", placeholder: "all (or nba, soccer, ucl, nfl, mlb, nhl)", secret: false },
       { key: "sports-endpoint", label: "Custom endpoint", placeholder: "Leave empty for default ESPN scoreboards", secret: false },
@@ -1113,7 +1117,7 @@ const INTEGRATIONS: IntegrationDef[] = [
     fields: [{ key: "calcom-api-key", label: "API key", placeholder: "cal_…", secret: true }] },
 ];
 
-const MAX_ACTIVE = 4;
+const MAX_ACTIVE = 5;
 
 function integrationsSection(present: Record<string, boolean>): HTMLElement {
   const note = h("div", { class: "hint" });
@@ -1153,6 +1157,14 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
           h("option", { value: "nhl", text: "NHL (Hockey)" }),
         ) as HTMLSelectElement;
         const saveSportBtn = h("button", { text: "Save" });
+        const testPollBtn = h("button", {
+          text: "🔄 Poll Now",
+          onclick: () => {
+            void Bridge.refreshIntegration("integration_sports");
+            testPollBtn.textContent = "✓ Polling…";
+            setTimeout(() => { testPollBtn.textContent = "🔄 Poll Now"; }, 2000);
+          },
+        });
         const dotEl = statusDot(present[field.key] ?? true);
         saveSportBtn.addEventListener("click", async () => {
           try {
@@ -1167,7 +1179,7 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
         rows.append(
           h("div", { class: "row" },
             h("label", { style: "min-width:104px", text: field.label }),
-            sportSelect, saveSportBtn, dotEl,
+            sportSelect, saveSportBtn, testPollBtn, dotEl,
           ),
         );
         continue;
