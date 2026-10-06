@@ -259,7 +259,7 @@ pub fn extract_and_save_memory(raw_text: &str) -> String {
         }
         // If malformed, advance past "<remember" to avoid infinite loop
         cleaned.push_str("<remember");
-        remaining = &after_start[9..];
+        remaining = after_start;
     }
     cleaned.push_str(remaining);
     cleaned.trim().to_string()

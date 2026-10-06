@@ -309,10 +309,6 @@ fn apply_input_region(gw: &impl IsA<gtk::Widget>, rect: Region) {
 
 pub fn configure_autostart(_enabled: bool) {}
 
-pub fn no_console(cmd: &mut Command) -> &mut Command {
-    cmd
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
