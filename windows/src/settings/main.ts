@@ -352,7 +352,7 @@ function geminiSection(hasKey: boolean): HTMLElement {
       feedback.append(h("div", { class: "notice ok", text: `Saved. ${modelLabel} is active for chat.` }));
       await refresh();
       updateProviderBadges();
-    } catch (err) {
+    }  catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
     }
   });
@@ -426,6 +426,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
 
   const saveUrlBtn = h("button", { text: "Save URL" });
   const testBtn = h("button", { class: "primary", text: "Test & Fetch Models" });
+  const pullBtn = h("button", { text: "⬇️ Download Model" });
   const feedback = h("div", {});
 
   const modelSelect = h("select", {}) as HTMLSelectElement;
@@ -484,7 +485,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     }
   });
 
-  testBtn.addEventListener("click", async () => {
+  async function performTest() {
     testBtn.disabled = true;
     clear(feedback);
     feedback.append(h("div", { class: "hint", text: "Connecting to local model server…" }));
@@ -505,18 +506,92 @@ function localModelSection(hasUrl: boolean): HTMLElement {
       } else {
         feedback.append(h("div", {
           class: "notice ok",
-          text: "Connected to local server! (No downloaded models in catalog yet. Run `ollama pull llama3.2` or enter custom model).",
+          text: "Connected to local server! (No downloaded models in catalog yet. Click '⬇️ Download Model' below to pull Llama 3.2 1B).",
         }));
       }
     } catch (err) {
       clear(feedback);
       dot.style.background = "#f4505e";
-      feedback.append(h("div", {
-        class: "notice warn",
-        text: `Could not connect: ${String(err).replace(/^Error:\s*/, "")}. Make sure Ollama (\`ollama serve\`) or LM Studio is running.`,
-      }));
+      feedback.append(
+        h("div", {
+          class: "notice warn",
+          text: `Could not connect: ${String(err).replace(/^Error:\s*/, "")}.`,
+        }),
+        h("div", {
+          style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;align-items:center",
+        },
+          h("span", { class: "hint", text: "First time setup:" }),
+          installEngineBtn,
+          manualOllamaBtn,
+          manualLMStudioBtn,
+        ),
+      );
     } finally {
       testBtn.disabled = false;
+    }
+  }
+
+  testBtn.addEventListener("click", () => void performTest());
+
+  // 1-Click engine installer via winget
+  const installEngineBtn = h("button", {
+    class: "primary",
+    text: "⚡ Install Ollama (1-Click Winget)",
+  });
+  installEngineBtn.addEventListener("click", async () => {
+    installEngineBtn.disabled = true;
+    clear(feedback);
+    feedback.append(h("div", {
+      class: "notice ok",
+      text: "Running Windows Package Manager (winget) to install Ollama… Please wait a moment.",
+    }));
+    try {
+      const res = await Bridge.installLocalEngine();
+      feedback.append(h("div", { class: "notice ok", text: res || "Installed successfully!" }));
+      setTimeout(() => void performTest(), 2000);
+    } catch (err) {
+      feedback.append(h("div", {
+        class: "notice err",
+        text: `Automated install failed: ${String(err)}. You can download it directly using the button below.`,
+      }));
+    } finally {
+      installEngineBtn.disabled = false;
+    }
+  });
+
+  const manualOllamaBtn = h("button", {
+    text: "🌐 Download Ollama (.exe)",
+    onclick: () => void Bridge.openUrl("https://ollama.com/download/windows"),
+  });
+
+  const manualLMStudioBtn = h("button", {
+    text: "🌐 Download LM Studio",
+    onclick: () => void Bridge.openUrl("https://lmstudio.ai"),
+  });
+
+  // 1-Click model downloader
+  pullBtn.addEventListener("click", async () => {
+    const chosen = customModelInput.value.trim() || modelSelect.value || "llama3.2:1b";
+    pullBtn.disabled = true;
+    clear(feedback);
+    feedback.append(h("div", {
+      class: "notice ok",
+      text: `Downloading '${chosen}' into your local storage (fits easily in storage and runs cool on CPU)… Please keep Coucou open.`,
+    }));
+    try {
+      const res = await Bridge.pullLocalModel(chosen);
+      feedback.append(h("div", { class: "notice ok", text: res }));
+      settings.model = `local:${chosen}`;
+      await save();
+      updateProviderBadges();
+      setTimeout(() => void performTest(), 1500);
+    } catch (err) {
+      feedback.append(h("div", {
+        class: "notice err",
+        text: `Download error: ${String(err)}. Make sure your local server is running.`,
+      }));
+    } finally {
+      pullBtn.disabled = false;
     }
   });
 
@@ -534,6 +609,16 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     }
   };
 
+  const setupRow = h("div", {
+    class: "row",
+    style: "background:rgba(255,255,255,0.02);border:1px dashed var(--hairline);border-radius:10px;padding:10px 12px;margin-top:2px",
+  },
+    h("span", { class: "hint", style: "min-width:132px", text: "Don't have Ollama?" }),
+    installEngineBtn,
+    manualOllamaBtn,
+    manualLMStudioBtn,
+  );
+
   return h(
     "section",
     {},
@@ -548,11 +633,13 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     h("div", { class: "row" },
       h("label", { text: "Installed model" }),
       modelSelect,
+      pullBtn,
     ),
     h("div", { class: "row" },
       h("label", { text: "Custom model tag" }),
       customModelInput,
     ),
+    setupRow,
     feedback,
   );
 }

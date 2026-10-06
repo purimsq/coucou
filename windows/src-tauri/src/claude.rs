@@ -439,6 +439,76 @@ pub async fn test_local_server(custom_url: Option<&str>) -> Result<Vec<String>, 
     }
 }
 
+pub async fn install_engine() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let output = std::process::Command::new("winget")
+            .args(&[
+                "install",
+                "Ollama.Ollama",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--silent",
+            ])
+            .output()
+            .map_err(|e| format!("Could not run winget: {e}"))?;
+
+        if output.status.success() {
+            // Start Ollama app in background
+            let _ = std::process::Command::new("cmd")
+                .args(&["/C", "start", "ollama", "serve"])
+                .spawn();
+            Ok("Ollama installed and server started successfully!".to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let combined = format!("{stdout} {stderr}").trim().to_string();
+            if combined.contains("already installed") {
+                let _ = std::process::Command::new("cmd")
+                    .args(&["/C", "start", "ollama", "serve"])
+                    .spawn();
+                Ok("Ollama was already installed. Starting local server...".to_string())
+            } else {
+                Err(format!("Installation failed: {combined}"))
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn pull_model(model_name: String) -> Result<String, String> {
+    let endpoint = secrets::get("local-model-url")
+        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+    let url = format!("{}/api/pull", endpoint.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let res = client
+        .post(&url)
+        .json(&serde_json::json!({ "name": model_name, "stream": false }))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_connect() {
+                format!("Could not connect to {endpoint}. Is Ollama running?")
+            } else if e.is_timeout() {
+                "Model download timed out (10m). Check your internet connection.".to_string()
+            } else {
+                format!("Download error: {e}")
+            }
+        })?;
+
+    if res.status().is_success() {
+        Ok(format!("Model '{model_name}' successfully downloaded and ready for Mochi!"))
+    } else {
+        let code = res.status();
+        let body = res.text().await.unwrap_or_default();
+        Err(format!("Download failed (HTTP {code}): {body}"))
+    }
+}
+
 async fn send_local(
     chat: &Chat,
     model: &str,

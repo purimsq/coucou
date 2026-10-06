@@ -88,6 +88,8 @@ export const Bridge = {
   chatLoad: () => call<ChatMessageEntry[]>("chat_load"),
   chatClear: () => callOrThrow<void>("chat_clear"),
   testLocalModel: (url?: string) => callOrThrow<string[]>("test_local_model", { url }),
+  installLocalEngine: () => callOrThrow<string>("install_local_engine"),
+  pullLocalModel: (model: string) => callOrThrow<string>("pull_local_model", { model }),
 
   // ── Mochi's Long-Term Memory & User Profile ───────────────────────────────
   profileGet: () => call<UserProfile>("profile_get"),

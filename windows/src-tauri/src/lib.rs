@@ -286,6 +286,16 @@ async fn test_local_model(url: Option<String>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn install_local_engine() -> Result<String, String> {
+    claude::install_engine().await
+}
+
+#[tauri::command]
+async fn pull_local_model(model: String) -> Result<String, String> {
+    claude::pull_model(model).await
+}
+
+#[tauri::command]
 fn profile_get() -> UserProfile {
     memory::load_profile()
 }
@@ -460,6 +470,8 @@ pub fn run() {
             chat_load,
             chat_clear,
             test_local_model,
+            install_local_engine,
+            pull_local_model,
             profile_get,
             profile_save,
             profile_fact_add,
