@@ -286,13 +286,13 @@ async fn test_local_model(url: Option<String>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn install_local_engine() -> Result<String, String> {
-    claude::install_engine().await
+async fn install_local_engine(app: AppHandle) -> Result<String, String> {
+    claude::install_engine(&app).await
 }
 
 #[tauri::command]
-async fn pull_local_model(model: String) -> Result<String, String> {
-    claude::pull_model(model).await
+async fn pull_local_model(app: AppHandle, model: String) -> Result<String, String> {
+    claude::pull_model(&app, model).await
 }
 
 #[tauri::command]

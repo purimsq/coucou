@@ -439,74 +439,255 @@ pub async fn test_local_server(custom_url: Option<&str>) -> Result<Vec<String>, 
     }
 }
 
-pub async fn install_engine() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let output = std::process::Command::new("winget")
-            .args(&[
-                "install",
-                "Ollama.Ollama",
-                "--accept-source-agreements",
-                "--accept-package-agreements",
-                "--silent",
-            ])
-            .output()
-            .map_err(|e| format!("Could not run winget: {e}"))?;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadProgressPayload {
+    pub kind: String,        // "engine" | "model"
+    pub status: String,
+    pub completed: u64,
+    pub total: u64,
+    pub percent: f64,
+    pub done: bool,
+    pub error: Option<String>,
+}
 
-        if output.status.success() {
-            // Start Ollama app in background
+pub async fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
+    use tauri::Emitter;
+
+    // Check if Ollama is already installed on Windows
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let installed_ollama_path = std::path::PathBuf::from(&local_app_data)
+        .join("Programs")
+        .join("Ollama")
+        .join("ollama.exe");
+
+    if installed_ollama_path.exists() {
+        let _ = std::process::Command::new("cmd")
+            .args(&["/C", "start", "", installed_ollama_path.to_string_lossy().as_ref(), "serve"])
+            .spawn();
+        let _ = app.emit("local-download-progress", DownloadProgressPayload {
+            kind: "engine".to_string(),
+            status: "Ollama is already installed! Server started.".to_string(),
+            completed: 100,
+            total: 100,
+            percent: 100.0,
+            done: true,
+            error: None,
+        });
+        return Ok("Ollama is already installed! Server started.".to_string());
+    }
+
+    let _ = app.emit("local-download-progress", DownloadProgressPayload {
+        kind: "engine".to_string(),
+        status: "Connecting to Ollama download server…".to_string(),
+        completed: 0,
+        total: 0,
+        percent: 0.0,
+        done: false,
+        error: None,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let installer_url = "https://ollama.com/download/OllamaSetup.exe";
+    let mut res = match client.get(installer_url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => {
+            // Fallback to winget if direct download cannot be started
+            let _ = app.emit("local-download-progress", DownloadProgressPayload {
+                kind: "engine".to_string(),
+                status: "Direct download unavailable, attempting winget install…".to_string(),
+                completed: 50,
+                total: 100,
+                percent: 50.0,
+                done: false,
+                error: None,
+            });
+            return tauri::async_runtime::spawn_blocking(|| {
+                let output = std::process::Command::new("winget")
+                    .args(&["install", "Ollama.Ollama", "--accept-source-agreements", "--accept-package-agreements", "--silent"])
+                    .output()
+                    .map_err(|e| format!("Could not run winget: {e}"))?;
+                if output.status.success() {
+                    let _ = std::process::Command::new("cmd").args(&["/C", "start", "ollama", "serve"]).spawn();
+                    Ok("Ollama installed successfully via winget!".to_string())
+                } else {
+                    let combined = format!("{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)).trim().to_string();
+                    if combined.contains("already installed") {
+                        let _ = std::process::Command::new("cmd").args(&["/C", "start", "ollama", "serve"]).spawn();
+                        Ok("Ollama was already installed. Starting local server…".to_string())
+                    } else {
+                        Err(format!("Installation failed: {combined}"))
+                    }
+                }
+            }).await.map_err(|e| e.to_string())?;
+        }
+    };
+
+    let total_bytes = res.content_length().unwrap_or(1_580_000_000);
+    let temp_dir = std::env::temp_dir();
+    let temp_installer = temp_dir.join("Coucou_OllamaSetup.exe");
+
+    let mut file = std::fs::File::create(&temp_installer)
+        .map_err(|e| format!("Could not create temporary installer file: {e}"))?;
+
+    use std::io::Write;
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+
+    while let Some(chunk) = res.chunk().await.map_err(|e| format!("Installer download error: {e}"))? {
+        file.write_all(&chunk).map_err(|e| format!("Failed to write chunk: {e}"))?;
+        downloaded += chunk.len() as u64;
+
+        if last_emit.elapsed().as_millis() > 150 || downloaded >= total_bytes {
+            last_emit = std::time::Instant::now();
+            let percent = if total_bytes > 0 {
+                ((downloaded as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            let _ = app.emit("local-download-progress", DownloadProgressPayload {
+                kind: "engine".to_string(),
+                status: format!("Downloading Ollama installer ({:.0}%)…", percent),
+                completed: downloaded,
+                total: total_bytes,
+                percent,
+                done: false,
+                error: None,
+            });
+        }
+    }
+    drop(file);
+
+    let _ = app.emit("local-download-progress", DownloadProgressPayload {
+        kind: "engine".to_string(),
+        status: "Installing Ollama silently… (Please wait a moment)".to_string(),
+        completed: total_bytes,
+        total: total_bytes,
+        percent: 100.0,
+        done: false,
+        error: None,
+    });
+
+    let installer_path_clone = temp_installer.clone();
+    let install_res = tauri::async_runtime::spawn_blocking(move || {
+        let output = std::process::Command::new(&installer_path_clone)
+            .args(&["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])
+            .output();
+        let _ = std::fs::remove_file(&installer_path_clone);
+        output
+    }).await.map_err(|e| e.to_string())?;
+
+    match install_res {
+        Ok(out) if out.status.success() => {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
             let _ = std::process::Command::new("cmd")
                 .args(&["/C", "start", "ollama", "serve"])
                 .spawn();
-            Ok("Ollama installed and server started successfully!".to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let combined = format!("{stdout} {stderr}").trim().to_string();
-            if combined.contains("already installed") {
-                let _ = std::process::Command::new("cmd")
-                    .args(&["/C", "start", "ollama", "serve"])
-                    .spawn();
-                Ok("Ollama was already installed. Starting local server...".to_string())
-            } else {
-                Err(format!("Installation failed: {combined}"))
-            }
+            let _ = app.emit("local-download-progress", DownloadProgressPayload {
+                kind: "engine".to_string(),
+                status: "Ollama successfully installed and server started!".to_string(),
+                completed: total_bytes,
+                total: total_bytes,
+                percent: 100.0,
+                done: true,
+                error: None,
+            });
+            Ok("Ollama successfully installed and server started!".to_string())
         }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(format!("Installer exited with error: {stderr}"))
+        }
+        Err(e) => Err(format!("Could not run installer: {e}")),
+    }
 }
 
-pub async fn pull_model(model_name: String) -> Result<String, String> {
+pub async fn pull_model(app: &tauri::AppHandle, model_name: String) -> Result<String, String> {
+    use tauri::Emitter;
     let endpoint = secrets::get("local-model-url")
         .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
     let url = format!("{}/api/pull", endpoint.trim_end_matches('/'));
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(std::time::Duration::from_secs(1800))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let res = client
+    let mut res = client
         .post(&url)
-        .json(&serde_json::json!({ "name": model_name, "stream": false }))
+        .json(&serde_json::json!({ "name": model_name, "stream": true }))
         .send()
         .await
         .map_err(|e| {
             if e.is_connect() {
                 format!("Could not connect to {endpoint}. Is Ollama running?")
             } else if e.is_timeout() {
-                "Model download timed out (10m). Check your internet connection.".to_string()
+                "Model download timed out. Check your internet connection.".to_string()
             } else {
                 format!("Download error: {e}")
             }
         })?;
 
-    if res.status().is_success() {
-        Ok(format!("Model '{model_name}' successfully downloaded and ready for Mochi!"))
-    } else {
+    if !res.status().is_success() {
         let code = res.status();
         let body = res.text().await.unwrap_or_default();
-        Err(format!("Download failed (HTTP {code}): {body}"))
+        return Err(format!("Download failed (HTTP {code}): {body}"));
     }
+
+    let mut buffer = String::new();
+    let mut last_emit = std::time::Instant::now();
+
+    while let Some(chunk) = res.chunk().await.map_err(|e| format!("Stream error: {e}"))? {
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&chunk_str);
+
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim().to_string();
+            buffer = buffer[newline_pos + 1..].to_string();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                let status = v.get("status").and_then(Value::as_str).unwrap_or("Downloading…").to_string();
+                let completed = v.get("completed").and_then(Value::as_u64).unwrap_or(0);
+                let total = v.get("total").and_then(Value::as_u64).unwrap_or(0);
+                let percent = if total > 0 {
+                    ((completed as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+
+                if last_emit.elapsed().as_millis() > 100 || total == 0 || percent >= 100.0 {
+                    last_emit = std::time::Instant::now();
+                    let _ = app.emit("local-download-progress", DownloadProgressPayload {
+                        kind: "model".to_string(),
+                        status,
+                        completed,
+                        total,
+                        percent,
+                        done: false,
+                        error: None,
+                    });
+                }
+            }
+        }
+    }
+
+    let _ = app.emit("local-download-progress", DownloadProgressPayload {
+        kind: "model".to_string(),
+        status: format!("Model '{model_name}' successfully downloaded!"),
+        completed: 100,
+        total: 100,
+        percent: 100.0,
+        done: true,
+        error: None,
+    });
+
+    Ok(format!("Model '{model_name}' successfully downloaded and ready for Mochi!"))
 }
 
 async fn send_local(

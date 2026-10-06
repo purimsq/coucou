@@ -179,6 +179,16 @@ export type BridgeEvent =
   | { name: "hook"; payload: Record<string, unknown> }
   | { name: "screen-changed"; payload: null };
 
+export interface DownloadProgressPayload {
+  kind: "engine" | "model";
+  status: string;
+  completed: number;
+  total: number;
+  percent: number;
+  done: boolean;
+  error?: string | null;
+}
+
 export interface DragDropPayload {
   type: "enter" | "over" | "drop" | "leave";
   paths?: string[];

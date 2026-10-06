@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus, type UserProfile } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus, type UserProfile, type DownloadProgressPayload } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear, svg, dot } from "../views/dom";
 import { ICONS } from "../views/icons";
@@ -533,23 +533,81 @@ function localModelSection(hasUrl: boolean): HTMLElement {
 
   testBtn.addEventListener("click", () => void performTest());
 
-  // 1-Click engine installer via winget
+  // ── Realtime Progress Bar Component ──
+  function formatBytes(bytes: number): string {
+    if (bytes <= 0) return "0 MB";
+    const mb = bytes / (1024 * 1024);
+    if (mb >= 1024) {
+      return `${(mb / 1024).toFixed(2)} GB`;
+    }
+    return `${mb.toFixed(1)} MB`;
+  }
+
+  const progressContainer = h("div", {
+    class: "download-progress-container",
+    style: "display:none",
+  });
+  const progressHeader = h("div", { class: "download-progress-header" });
+  const progressStatus = h("span", { class: "download-progress-status", text: "Starting download…" });
+  const progressPercent = h("span", { class: "download-progress-percent", text: "0%" });
+  progressHeader.append(progressStatus, progressPercent);
+
+  const progressTrack = h("div", { class: "download-progress-track" });
+  const progressFill = h("div", { class: "download-progress-fill" });
+  progressTrack.append(progressFill);
+
+  const progressFooter = h("div", { class: "download-progress-footer" });
+  const progressDetails = h("span", { class: "download-progress-bytes", text: "" });
+  progressFooter.append(progressDetails);
+
+  progressContainer.append(progressHeader, progressTrack, progressFooter);
+
+  onEvent<DownloadProgressPayload>("local-download-progress", (p) => {
+    progressContainer.style.display = "flex";
+    const pct = Math.min(100, Math.max(0, p.percent || 0));
+    progressFill.style.width = `${pct.toFixed(1)}%`;
+    progressPercent.textContent = `${pct.toFixed(0)}%`;
+    progressStatus.textContent = p.status || (p.kind === "engine" ? "Downloading Ollama…" : "Downloading model weights…");
+
+    if (p.total > 0) {
+      progressDetails.textContent = `${formatBytes(p.completed)} / ${formatBytes(p.total)}`;
+    } else if (p.completed > 0) {
+      progressDetails.textContent = `${formatBytes(p.completed)}`;
+    } else {
+      progressDetails.textContent = "";
+    }
+
+    if (p.done) {
+      progressFill.style.width = "100%";
+      progressFill.classList.add("done");
+      setTimeout(() => {
+        progressContainer.style.display = "none";
+        progressFill.classList.remove("done");
+      }, 4500);
+    }
+  });
+
+  // 1-Click engine installer with progress
   const installEngineBtn = h("button", {
     class: "primary",
-    text: "⚡ Install Ollama (1-Click Winget)",
+    text: "⚡ Install Ollama (1-Click)",
   });
   installEngineBtn.addEventListener("click", async () => {
     installEngineBtn.disabled = true;
     clear(feedback);
-    feedback.append(h("div", {
-      class: "notice ok",
-      text: "Running Windows Package Manager (winget) to install Ollama… Please wait a moment.",
-    }));
+    progressContainer.style.display = "flex";
+    progressFill.classList.remove("done");
+    progressFill.style.width = "0%";
+    progressPercent.textContent = "0%";
+    progressStatus.textContent = "Connecting to download Ollama installer…";
+    progressDetails.textContent = "";
+
     try {
       const res = await Bridge.installLocalEngine();
       feedback.append(h("div", { class: "notice ok", text: res || "Installed successfully!" }));
       setTimeout(() => void performTest(), 2000);
     } catch (err) {
+      progressContainer.style.display = "none";
       feedback.append(h("div", {
         class: "notice err",
         text: `Automated install failed: ${String(err)}. You can download it directly using the button below.`,
@@ -569,15 +627,18 @@ function localModelSection(hasUrl: boolean): HTMLElement {
     onclick: () => void Bridge.openUrl("https://lmstudio.ai"),
   });
 
-  // 1-Click model downloader
+  // 1-Click model downloader with realtime streaming progress
   pullBtn.addEventListener("click", async () => {
     const chosen = customModelInput.value.trim() || modelSelect.value || "llama3.2:1b";
     pullBtn.disabled = true;
     clear(feedback);
-    feedback.append(h("div", {
-      class: "notice ok",
-      text: `Downloading '${chosen}' into your local storage (fits easily in storage and runs cool on CPU)… Please keep Coucou open.`,
-    }));
+    progressContainer.style.display = "flex";
+    progressFill.classList.remove("done");
+    progressFill.style.width = "0%";
+    progressPercent.textContent = "0%";
+    progressStatus.textContent = `Connecting to pull '${chosen}'…`;
+    progressDetails.textContent = "";
+
     try {
       const res = await Bridge.pullLocalModel(chosen);
       feedback.append(h("div", { class: "notice ok", text: res }));
@@ -586,6 +647,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
       updateProviderBadges();
       setTimeout(() => void performTest(), 1500);
     } catch (err) {
+      progressContainer.style.display = "none";
       feedback.append(h("div", {
         class: "notice err",
         text: `Download error: ${String(err)}. Make sure your local server is running.`,
@@ -640,6 +702,7 @@ function localModelSection(hasUrl: boolean): HTMLElement {
       customModelInput,
     ),
     setupRow,
+    progressContainer,
     feedback,
   );
 }
