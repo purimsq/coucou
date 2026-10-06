@@ -829,6 +829,31 @@ input[type="range"]::-webkit-slider-thumb {
   background: linear-gradient(135deg, #ff6b5b, #f7b32b, #2dd4a7, #38bdf8, #a78bfa);
 }
 
+.chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--ink-2);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.chip-close:hover {
+  background: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.chip-close svg {
+  pointer-events: none;
+}
+
 .chat-log {
   flex: 1 1 auto;
   min-height: 0;

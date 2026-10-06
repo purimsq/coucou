@@ -30,8 +30,24 @@ function typingDots(): HTMLElement {
 }
 
 /** The coloured chip showing what the question is about (a dropped file). */
-function contextChip(label: string): HTMLElement {
+function contextChip(label: string, onRemove?: () => void): HTMLElement {
   const chip = h("div", { class: "chip" }, h("i", { class: "chip-dot" }), h("span", { text: label }));
+  if (onRemove) {
+    const xBtn = h(
+      "button",
+      {
+        class: "chip-close",
+        title: "Remove attached file",
+        "aria-label": "Remove attachment",
+        onclick: (e: Event) => {
+          e.stopPropagation();
+          onRemove();
+        },
+      },
+      svg(ICONS.xmark, 8),
+    );
+    chip.append(xBtn);
+  }
   requestAnimationFrame(() => chip.classList.add("settled"));
   return chip;
 }
@@ -147,7 +163,18 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       if (chipRow.dataset.label !== wantChip) {
         chipRow.dataset.label = wantChip;
         clear(chipRow);
-        if (wantChip) chipRow.append(contextChip(wantChip));
+        if (wantChip) {
+          chipRow.append(
+            contextChip(wantChip, () => {
+              State.droppedFile = null;
+              State.promptContext = null;
+              chipRow.dataset.label = "";
+              clear(chipRow);
+              State.notify();
+              onHeightChange();
+            }),
+          );
+        }
       }
 
       const hasHistory = State.chatHistory.length > 0;

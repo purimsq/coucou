@@ -396,8 +396,6 @@ export class Island {
     const name = path.split(/[\\/]/).pop() || "file";
     State.droppedFile = { name, path };
     State.promptContext = { kind: "file", name, path };
-    State.chatHistory = [];
-    void Bridge.chatReset();
 
     UploadSeq.performDrop(State.uploadDuration);
     this.uploadTens = 0;

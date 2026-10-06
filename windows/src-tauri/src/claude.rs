@@ -186,26 +186,51 @@ async fn send_gemini(
         .ok_or_else(|| "Gemini API key missing. Open settings.".to_string())?;
 
     let mut user_text = query;
-    if chat.is_empty() {
-        if let Some(ctx) = &context {
-            match ctx {
-                ChatContext::File { name, path } => {
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        user_text = format!("File: {name}\nContents:\n{content}\n\n{user_text}");
+    let mut image_payload: Option<(String, String)> = None;
+
+    if let Some(ctx) = &context {
+        match ctx {
+            ChatContext::File { name, path } => {
+                match crate::files::inspect_file(path) {
+                    crate::files::FileContentInfo::Text(text) => {
+                        user_text = format!("File: {name}\nContents:\n{text}\n\n{user_text}");
+                    }
+                    crate::files::FileContentInfo::Docx(text) => {
+                        user_text = format!("Word Document ({name}):\n{text}\n\n{user_text}");
+                    }
+                    crate::files::FileContentInfo::Pdf { text_preview, .. } => {
+                        if !text_preview.is_empty() {
+                            user_text = format!("PDF Document ({name}) Extracted Content:\n{text_preview}\n\n{user_text}");
+                        } else {
+                            user_text = format!("PDF Document ({name}) attached.\n\n{user_text}");
+                        }
+                    }
+                    crate::files::FileContentInfo::Image { media_type, base64 } => {
+                        image_payload = Some((media_type, base64));
                     }
                 }
-                ChatContext::Window { app_name, title, url } => {
-                    let mut extra = format!("Context — App: {app_name}, Window: {title}");
-                    if let Some(u) = url {
-                        extra.push_str(&format!(", URL: {u}"));
-                    }
-                    user_text = format!("{extra}\n\n{user_text}");
+            }
+            ChatContext::Window { app_name, title, url } => {
+                let mut extra = format!("Context — App: {app_name}, Window: {title}");
+                if let Some(u) = url {
+                    extra.push_str(&format!(", URL: {u}"));
                 }
+                user_text = format!("{extra}\n\n{user_text}");
             }
         }
     }
 
-    chat.push(json!({ "role": "user", "content": user_text }));
+    if let Some((media_type, base64)) = image_payload {
+        chat.push(json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": user_text },
+                { "type": "image_url", "image_url": { "url": format!("data:{media_type};base64,{base64}") } }
+            ]
+        }));
+    } else {
+        chat.push(json!({ "role": "user", "content": user_text }));
+    }
 
     let sys_prompt = system_prompt();
     let mut messages = vec![json!({ "role": "system", "content": sys_prompt })];
@@ -215,18 +240,11 @@ async fn send_gemini(
     let window_start = if snapshot.len() > 12 { snapshot.len() - 12 } else { 0 };
     for m in &snapshot[window_start..] {
         if let (Some(role), Some(content)) = (m.get("role"), m.get("content")) {
-            let text = if let Some(s) = content.as_str() {
-                s.to_string()
-            } else if let Some(arr) = content.as_array() {
-                arr.iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                continue;
-            };
-            messages.push(json!({ "role": role, "content": text }));
+            if content.is_array() {
+                messages.push(json!({ "role": role, "content": content }));
+            } else if let Some(s) = content.as_str() {
+                messages.push(json!({ "role": role, "content": s }));
+            }
         }
     }
 
@@ -367,24 +385,45 @@ async fn send_anthropic(
 
     let mut content: Vec<Value> = Vec::new();
 
-    // File / window context rides along with the first message only, exactly
-    // like ClaudeService.chat().
-    if chat.is_empty() {
-        match &context {
-            Some(ChatContext::File { name, path }) => {
-                if let Some(block) = file_block(path) {
-                    content.push(block);
+    if let Some(ctx) = &context {
+        match ctx {
+            ChatContext::File { name, path } => {
+                match crate::files::inspect_file(path) {
+                    crate::files::FileContentInfo::Text(text) => {
+                        content.push(json!({
+                            "type": "text",
+                            "text": format!("File: {name}\nContents:\n{text}")
+                        }));
+                    }
+                    crate::files::FileContentInfo::Docx(text) => {
+                        content.push(json!({
+                            "type": "text",
+                            "text": format!("Word Document ({name}):\n{text}")
+                        }));
+                    }
+                    crate::files::FileContentInfo::Pdf { base64, .. } => {
+                        content.push(json!({
+                            "type": "document",
+                            "source": { "type": "base64", "media_type": "application/pdf", "data": base64 }
+                        }));
+                        content.push(json!({ "type": "text", "text": format!("File: {name}") }));
+                    }
+                    crate::files::FileContentInfo::Image { media_type, base64 } => {
+                        content.push(json!({
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": media_type, "data": base64 }
+                        }));
+                        content.push(json!({ "type": "text", "text": format!("File: {name}") }));
+                    }
                 }
-                content.push(json!({ "type": "text", "text": format!("File: {name}") }));
             }
-            Some(ChatContext::Window { app_name, title, url }) => {
+            ChatContext::Window { app_name, title, url } => {
                 let mut text = format!("Context — App: {app_name}, Window: {title}");
                 if let Some(url) = url {
                     text.push_str(&format!(", URL: {url}"));
                 }
                 content.push(json!({ "type": "text", "text": text }));
             }
-            None => {}
         }
     }
     content.push(json!({ "type": "text", "text": query }));
@@ -513,39 +552,7 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("Bad API response from Claude: {e}"))
 }
 
-/// PDF → document block, image → image block, text/code → inline text.
-/// Mirrors readFileAsBlock() in ClaudeService.swift.
-fn file_block(path: &str) -> Option<Value> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
 
-    let media_type = match ext.as_str() {
-        "pdf" => Some(("document", "application/pdf")),
-        "jpg" | "jpeg" => Some(("image", "image/jpeg")),
-        "png" => Some(("image", "image/png")),
-        "gif" => Some(("image", "image/gif")),
-        "webp" => Some(("image", "image/webp")),
-        _ => None,
-    };
-
-    if let Some((block_type, media)) = media_type {
-        let bytes = std::fs::read(path).ok()?;
-        return Some(json!({
-            "type": block_type,
-            "source": { "type": "base64", "media_type": media, "data": base64(&bytes) },
-        }));
-    }
-
-    let len = std::fs::metadata(path).ok()?.len();
-    if len > MAX_INLINE_TEXT {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(json!({ "type": "text", "text": format!("File contents:\n{text}") }))
-}
 
 /// Small standalone base64 encoder — not worth another dependency.
 /// Also used for Stripe's basic auth.
