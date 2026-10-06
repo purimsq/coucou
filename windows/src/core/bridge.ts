@@ -84,6 +84,7 @@ export const Bridge = {
   /** One chat turn. The API key and any file bytes never leave Rust. */
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string; memoryUpdated?: boolean }>("chat_send", { query, context }),
+  chatStop: () => call<void>("chat_stop"),
   chatReset: () => call<void>("chat_reset"),
   chatLoad: () => call<ChatMessageEntry[]>("chat_load"),
   chatClear: () => callOrThrow<void>("chat_clear"),

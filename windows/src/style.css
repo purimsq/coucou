@@ -1099,6 +1099,18 @@ input[type="range"]::-webkit-slider-thumb {
   transform: scale(0.94);
 }
 
+.send-btn.stopping {
+  background: var(--ink);
+  color: #0b0c0e;
+  cursor: pointer;
+  transition: transform 0.12s ease-out, background 0.12s ease;
+}
+
+.send-btn.stopping:hover {
+  background: #ffffff;
+  transform: scale(1.06);
+}
+
 /* ── Drop zone ──────────────────────────────────────────────────────────── */
 
 .drop-card {

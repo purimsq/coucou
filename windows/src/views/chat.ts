@@ -120,7 +120,19 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     placeholder: "Ask me anything…",
     spellcheck: "false",
   }) as HTMLInputElement;
-  const send = h("button", { class: "send-btn", title: "Send" }, svg(ICONS.arrowUp, 11));
+  const send = h(
+    "button",
+    {
+      class: "send-btn",
+      title: "Send",
+      "aria-label": "Send",
+      onmousedown: (e: Event) => {
+        // Prevent clicking the button from blurring the text input
+        e.preventDefault();
+      },
+    },
+    svg(ICONS.arrowUp, 11),
+  );
   const bar = h("div", { class: "chat-bar" }, input, send);
 
   const el = h(
@@ -129,6 +141,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, headerRow, log, bar)),
   );
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
+
+  bar.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest("button")) return;
+    input.focus();
+  });
 
   let sending = false;
   let renderedCount = -1;
@@ -238,11 +255,34 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
   clearBtn.addEventListener("click", () => void clearChat());
 
+  function updateSendButtonState(isSending: boolean) {
+    clear(send);
+    if (isSending) {
+      send.append(svg(ICONS.stop, 10));
+      send.title = "Stop generating";
+      send.setAttribute("aria-label", "Stop generating");
+      send.classList.add("stopping");
+    } else {
+      send.append(svg(ICONS.arrowUp, 11));
+      send.title = "Send";
+      send.setAttribute("aria-label", "Send");
+      send.classList.remove("stopping");
+    }
+  }
+
+  function stopGeneration() {
+    if (!sending) return;
+    void Bridge.chatStop();
+    Sound.play("blip");
+  }
+
   async function submit() {
     const query = input.value.trim();
     if (!query || sending) return;
     input.value = "";
     sending = true;
+    updateSendButtonState(true);
+    input.focus();
     Sound.play("send");
 
     const maxId = State.chatHistory.reduce((max, m) => Math.max(max, m.id), 0);
@@ -285,19 +325,24 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       // Clean up active temporary live DOM nodes
       cleanLiveNodes();
 
-      const isMemoryUpdated = Boolean(reply.memoryUpdated || memoryUpdatedInTurn);
-      const finalContent = reply.text || streamedContent;
-      const assistantMsg: ChatMessage = {
-        id: nextId++,
-        role: "assistant",
-        content: finalContent,
-        siteCount: lastSearchedCount > 0 ? lastSearchedCount : undefined,
-        memoryUpdated: isMemoryUpdated ? true : undefined,
-      };
-      State.chatHistory.push(assistantMsg);
-      State.droppedFile = null;
+      const finalContent = (reply.text || streamedContent).trim();
+      if (!finalContent) {
+        // Stopped before generating text: remove pending user turn to keep conversation clean
+        State.chatHistory.pop();
+      } else {
+        const isMemoryUpdated = Boolean(reply.memoryUpdated || memoryUpdatedInTurn);
+        const assistantMsg: ChatMessage = {
+          id: nextId++,
+          role: "assistant",
+          content: finalContent,
+          siteCount: lastSearchedCount > 0 ? lastSearchedCount : undefined,
+          memoryUpdated: isMemoryUpdated ? true : undefined,
+        };
+        State.chatHistory.push(assistantMsg);
+        State.droppedFile = null;
+        Sound.play("finish");
+      }
       State.stateOverride = null;
-      Sound.play("finish");
     } catch (err) {
       cleanLiveNodes();
       State.chatHistory.pop();
@@ -308,22 +353,35 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       Sound.play("error");
     } finally {
       sending = false;
+      updateSendButtonState(false);
       cleanLiveNodes();
       activeStatus = null;
       lastSearchedCount = 0;
       streamedContent = "";
       memoryUpdatedInTurn = false;
+      renderedCount = -1;
       State.notify();
       onHeightChange();
       input.focus();
     }
   }
 
-  send.addEventListener("click", () => void submit());
+  send.addEventListener("click", () => {
+    if (sending) {
+      stopGeneration();
+    } else {
+      void submit();
+    }
+    input.focus();
+  });
+
   input.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Enter") {
       e.preventDefault();
-      void submit();
+      if (!sending) {
+        void submit();
+      }
+      input.focus();
     }
     e.stopPropagation(); // Escape closes the island, not the chat
   });
@@ -345,6 +403,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
               clear(chipRow);
               State.notify();
               onHeightChange();
+              input.focus();
             }),
           );
         }
@@ -365,11 +424,10 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       }
 
       input.placeholder = State.chatHistory.length === 0 ? "Ask me anything…" : "Continue…";
-      input.disabled = sending;
+      // Keep input persistently enabled and focused so user never has to re-click
     },
     focus() {
       input.focus();
-      input.select();
     },
   };
 }

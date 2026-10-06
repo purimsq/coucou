@@ -24,6 +24,8 @@ export const ICONS = {
   check: "M5 12.5 9.5 17 19 7.5",
   // arrow.up (send)
   arrowUp: "M12 4.5 5.5 11l1.5 1.5 4-4V19.5h2V8.5l4 4L18.5 11 12 4.5z",
+  // stop (square)
+  stop: "M7 7h10v10H7z",
   // exclamationmark
   bang: "M11 4h2v10h-2V4zm0 12.2h2v2.2h-2v-2.2z",
   // xmark

@@ -267,6 +267,11 @@ async fn chat_send(
 }
 
 #[tauri::command]
+fn chat_stop() {
+    claude::cancel_current_turn();
+}
+
+#[tauri::command]
 fn chat_reset(chat: State<Chat>) {
     chat.reset();
 }
@@ -468,6 +473,7 @@ pub fn run() {
             approval_decline,
             log_line,
             chat_send,
+            chat_stop,
             chat_reset,
             chat_load,
             chat_clear,

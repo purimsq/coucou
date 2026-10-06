@@ -4,6 +4,7 @@
 // Everything happens here rather than in the island: the API key never leaves
 // the Credential Manager, and file bytes never cross the IPC boundary.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,20 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 use crate::secrets;
+
+static CHAT_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+pub fn cancel_current_turn() {
+    CHAT_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+pub fn is_turn_cancelled() -> bool {
+    CHAT_CANCELLED.load(Ordering::SeqCst)
+}
+
+pub fn reset_turn_cancelled() {
+    CHAT_CANCELLED.store(false, Ordering::SeqCst);
+}
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const GEMINI_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
@@ -381,6 +396,8 @@ pub async fn send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
+    reset_turn_cancelled();
+
     if model.starts_with("local:") || model.starts_with("ollama:") || model.starts_with("lmstudio:") {
         let clean_model = model
             .strip_prefix("local:")
@@ -491,10 +508,23 @@ async fn send_gemini(
             query.clone()
         };
         let search_items = perform_web_search(&search_query).await;
+        if is_turn_cancelled() {
+            return Ok(ChatReply {
+                text: String::new(),
+                memory_updated: false,
+            });
+        }
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
             grounding_block = Some(format_grounding_system_context(&query, &search_items));
         }
+    }
+
+    if is_turn_cancelled() {
+        return Ok(ChatReply {
+            text: String::new(),
+            memory_updated: false,
+        });
     }
 
     let _ = app.emit("chat-status", json!({ "status": "thinking", "detail": "Thinking…" }));
@@ -600,6 +630,9 @@ async fn send_gemini(
     let mut buffer = String::new();
 
     while let Ok(Some(chunk)) = response.chunk().await {
+        if is_turn_cancelled() {
+            break;
+        }
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
         while let Some(pos) = buffer.find('\n') {
@@ -629,7 +662,15 @@ async fn send_gemini(
 
     let _ = app.emit("chat-token", json!({ "token": "", "done": true }));
 
-    if reply_text.trim().is_empty() {
+    if is_turn_cancelled() {
+        if reply_text.trim().is_empty() {
+            chat.pop();
+            return Ok(ChatReply {
+                text: String::new(),
+                memory_updated: false,
+            });
+        }
+    } else if reply_text.trim().is_empty() {
         chat.pop();
         return Err("Gemini returned an empty response.".into());
     }
@@ -1131,10 +1172,23 @@ async fn send_local(
             query.clone()
         };
         let search_items = perform_web_search(&search_query).await;
+        if is_turn_cancelled() {
+            return Ok(ChatReply {
+                text: String::new(),
+                memory_updated: false,
+            });
+        }
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
             grounding_block = Some(format_grounding_system_context(&query, &search_items));
         }
+    }
+
+    if is_turn_cancelled() {
+        return Ok(ChatReply {
+            text: String::new(),
+            memory_updated: false,
+        });
     }
 
     let _ = app.emit("chat-status", json!({ "status": "thinking", "detail": "Thinking…" }));
@@ -1224,6 +1278,9 @@ async fn send_local(
         Ok(mut resp) if resp.status().is_success() => {
             let mut buffer = String::new();
             while let Ok(Some(chunk)) = resp.chunk().await {
+                if is_turn_cancelled() {
+                    break;
+                }
                 let chunk_str = String::from_utf8_lossy(&chunk);
                 buffer.push_str(&chunk_str);
                 while let Some(pos) = buffer.find('\n') {
@@ -1268,6 +1325,9 @@ async fn send_local(
             {
                 let mut buffer = String::new();
                 while let Ok(Some(chunk)) = o_res.chunk().await {
+                    if is_turn_cancelled() {
+                        break;
+                    }
                     let chunk_str = String::from_utf8_lossy(&chunk);
                     buffer.push_str(&chunk_str);
                     while let Some(pos) = buffer.find('\n') {
@@ -1292,7 +1352,15 @@ async fn send_local(
 
     let _ = app.emit("chat-token", json!({ "token": "", "done": true }));
 
-    if reply_text.trim().is_empty() {
+    if is_turn_cancelled() {
+        if reply_text.trim().is_empty() {
+            chat.pop();
+            return Ok(ChatReply {
+                text: String::new(),
+                memory_updated: false,
+            });
+        }
+    } else if reply_text.trim().is_empty() {
         chat.pop();
         return Err("Local model produced an empty response.".into());
     }
@@ -1335,10 +1403,23 @@ async fn send_anthropic(
             query.clone()
         };
         let search_items = perform_web_search(&search_query).await;
+        if is_turn_cancelled() {
+            return Ok(ChatReply {
+                text: String::new(),
+                memory_updated: false,
+            });
+        }
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
             grounding_block = Some(format_grounding_system_context(&query, &search_items));
         }
+    }
+
+    if is_turn_cancelled() {
+        return Ok(ChatReply {
+            text: String::new(),
+            memory_updated: false,
+        });
     }
 
     let _ = app.emit("chat-status", json!({ "status": "thinking", "detail": "Thinking…" }));
@@ -1458,6 +1539,9 @@ async fn send_anthropic(
     let mut buffer = String::new();
 
     while let Ok(Some(chunk)) = response.chunk().await {
+        if is_turn_cancelled() {
+            break;
+        }
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
         while let Some(pos) = buffer.find('\n') {
@@ -1481,7 +1565,15 @@ async fn send_anthropic(
 
     let _ = app.emit("chat-token", json!({ "token": "", "done": true }));
 
-    if reply_text.trim().is_empty() {
+    if is_turn_cancelled() {
+        if reply_text.trim().is_empty() {
+            chat.pop();
+            return Ok(ChatReply {
+                text: String::new(),
+                memory_updated: false,
+            });
+        }
+    } else if reply_text.trim().is_empty() {
         chat.pop();
         return Err("Claude returned an empty response.".into());
     }
