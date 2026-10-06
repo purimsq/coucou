@@ -192,14 +192,20 @@ fn parse_lite_duckduckgo_html(html: &str) -> Vec<SearchItem> {
     items
 }
 
+static SEARCH_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn search_client() -> &'static reqwest::Client {
+    SEARCH_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(6))
+            .pool_max_idle_per_host(4)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 pub async fn perform_web_search(query: &str) -> Vec<SearchItem> {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(6))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+    let client = search_client();
 
     let params = [("q", query)];
     let resp = client
