@@ -815,7 +815,7 @@ async fn ensure_llama_server_running(model_tag: &str) -> Result<String, String> 
         "--n-gpu-layers", "0",
     ]);
     #[cfg(windows)]
-    crate::platform::windows::no_console(&mut cmd);
+    crate::platform::no_console(&mut cmd);
 
     let child = cmd.spawn().map_err(|e| format!("Failed to spawn llama-server: {e}"))?;
     {
