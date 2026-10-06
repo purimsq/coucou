@@ -3,12 +3,23 @@
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
-import { Bridge, type ChatContext } from "../core/bridge";
+import { Bridge, onEvent, type ChatContext } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
+
+interface ChatStatusPayload {
+  status: "searching" | "searched" | "thinking";
+  detail: string;
+  siteCount?: number;
+}
+
+interface ChatTokenPayload {
+  token: string;
+  done: boolean;
+}
 
 function bubble(message: ChatMessage): HTMLElement {
   if (message.role === "user") {
@@ -18,15 +29,50 @@ function bubble(message: ChatMessage): HTMLElement {
       h("div", { class: "bubble", text: message.content }),
     );
   }
-  return h("div", { class: "chat-row" }, h("div", { class: "reply", text: message.content }));
+
+  const replyEl = h("div", { class: "reply" });
+  if (message.siteCount && message.siteCount > 0) {
+    const badge = h(
+      "div",
+      { class: "chat-grounding-badge" },
+      h("span", { class: "globe-icon" }, svg(ICONS.globe, 11)),
+      h("span", { text: `Searched ${message.siteCount} websites` }),
+    );
+    replyEl.append(badge);
+  }
+  replyEl.append(document.createTextNode(message.content));
+
+  if (message.memoryUpdated) {
+    const pill = h(
+      "div",
+      { class: "chat-memory-pill" },
+      h("span", { class: "sparkle-icon" }, svg(ICONS.sparkles, 11)),
+      h("span", { text: "Memory updated" }),
+    );
+    replyEl.append(pill);
+  }
+
+  return h("div", { class: "chat-row" }, replyEl);
 }
 
-function typingDots(): HTMLElement {
-  return h(
-    "div",
-    { class: "chat-row" },
-    h("div", { class: "typing" }, h("i"), h("i"), h("i")),
-  );
+function statusRow(status: ChatStatusPayload): HTMLElement {
+  const isThinking = status.status === "thinking";
+  const row = h("div", { class: "chat-row status-row" });
+  const bubble = h("div", { class: `chat-status-bubble ${isThinking ? "thinking" : ""}` });
+
+  if (!isThinking) {
+    const globe = h("span", { class: "chat-status-globe" }, svg(ICONS.globe, 13));
+    bubble.append(globe);
+  }
+
+  const isPulse = status.status === "searching" || isThinking;
+  const text = h("span", {
+    class: `chat-status-text ${isPulse ? "pulse" : ""}`,
+    text: status.detail,
+  });
+  bubble.append(text);
+  row.append(bubble);
+  return row;
 }
 
 /** The coloured chip showing what the question is about (a dropped file). */
@@ -85,6 +131,87 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
   let sending = false;
   let renderedCount = -1;
+  let activeStatus: ChatStatusPayload | null = null;
+  let activeStatusEl: HTMLElement | null = null;
+  let activeReplyEl: HTMLElement | null = null;
+  let activeReplyRow: HTMLElement | null = null;
+  let lastSearchedCount = 0;
+  let streamedContent = "";
+
+  // Subscribe to live backend status and token events
+  void onEvent<ChatStatusPayload>("chat-status", (payload) => {
+    if (!sending) return;
+    activeStatus = payload;
+    if (payload.siteCount && payload.siteCount > 0) {
+      lastSearchedCount = payload.siteCount;
+    }
+
+    if (!activeReplyEl) {
+      if (activeStatusEl && activeStatusEl.parentNode) {
+        const newStatusEl = statusRow(payload);
+        activeStatusEl.replaceWith(newStatusEl);
+        activeStatusEl = newStatusEl;
+      } else {
+        activeStatusEl = statusRow(payload);
+        log.append(activeStatusEl);
+      }
+      log.scrollTop = log.scrollHeight;
+      onHeightChange();
+    }
+  });
+
+  void onEvent<ChatTokenPayload>("chat-token", (payload) => {
+    if (!sending) return;
+    if (payload.token) {
+      if (!activeReplyEl) {
+        if (activeStatusEl && activeStatusEl.parentNode) {
+          activeStatusEl.remove();
+          activeStatusEl = null;
+        }
+
+        activeReplyEl = h("div", { class: "reply" });
+        if (lastSearchedCount > 0) {
+          const badge = h(
+            "div",
+            { class: "chat-grounding-badge" },
+            h("span", { class: "globe-icon" }, svg(ICONS.globe, 11)),
+            h("span", { text: `Searched ${lastSearchedCount} websites` }),
+          );
+          activeReplyEl.append(badge);
+        }
+
+        activeReplyRow = h("div", { class: "chat-row" }, activeReplyEl);
+        log.append(activeReplyRow);
+      }
+
+      // Append token smoothly with fade-in animation
+      const tokenSpan = h("span", { class: "token-fade", text: payload.token });
+      activeReplyEl.append(tokenSpan);
+      streamedContent += payload.token;
+      log.scrollTop = log.scrollHeight;
+      onHeightChange();
+    }
+  });
+
+  let memoryUpdatedInTurn = false;
+
+  void onEvent<{ updated: boolean }>("memory-updated", (payload) => {
+    if (!sending) return;
+    if (payload.updated) {
+      memoryUpdatedInTurn = true;
+      if (activeReplyEl && !activeReplyEl.querySelector(".chat-memory-pill")) {
+        const pill = h(
+          "div",
+          { class: "chat-memory-pill" },
+          h("span", { class: "sparkle-icon" }, svg(ICONS.sparkles, 11)),
+          h("span", { text: "Memory updated" }),
+        );
+        activeReplyEl.append(pill);
+        log.scrollTop = log.scrollHeight;
+        onHeightChange();
+      }
+    }
+  });
 
   async function clearChat() {
     if (sending || State.chatHistory.length === 0) return;
@@ -116,22 +243,58 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     const maxId = State.chatHistory.reduce((max, m) => Math.max(max, m.id), 0);
     if (maxId >= nextId) nextId = maxId + 1;
 
-    State.chatHistory.push({ id: nextId++, role: "user", content: query });
+    const userMsg: ChatMessage = { id: nextId++, role: "user", content: query };
+    State.chatHistory.push(userMsg);
     State.stateOverride = "thinking";
-    State.notify();
+
+    // Append user bubble to DOM immediately
+    log.append(bubble(userMsg));
+
+    // Initial status: "Thinking…" (NO 3 dots!)
+    activeStatus = { status: "thinking", detail: "Thinking…" };
+    lastSearchedCount = 0;
+    streamedContent = "";
+    memoryUpdatedInTurn = false;
+    activeReplyEl = null;
+    activeReplyRow = null;
+    activeStatusEl = statusRow(activeStatus);
+    log.append(activeStatusEl);
+    log.scrollTop = log.scrollHeight;
     onHeightChange();
 
     const file = State.droppedFile;
     const context: ChatContext | null =
       file ? { kind: "file", name: file.name, path: file.path } : null;
 
+    function cleanLiveNodes() {
+      (activeStatusEl as HTMLElement | null)?.remove();
+      (activeReplyRow as HTMLElement | null)?.remove();
+      activeStatusEl = null;
+      activeReplyEl = null;
+      activeReplyRow = null;
+    }
+
     try {
       const reply = await Bridge.chatSend(query, context);
-      State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+
+      // Clean up active temporary live DOM nodes
+      cleanLiveNodes();
+
+      const isMemoryUpdated = Boolean(reply.memoryUpdated || memoryUpdatedInTurn);
+      const finalContent = reply.text || streamedContent;
+      const assistantMsg: ChatMessage = {
+        id: nextId++,
+        role: "assistant",
+        content: finalContent,
+        siteCount: lastSearchedCount > 0 ? lastSearchedCount : undefined,
+        memoryUpdated: isMemoryUpdated ? true : undefined,
+      };
+      State.chatHistory.push(assistantMsg);
       State.droppedFile = null;
       State.stateOverride = null;
       Sound.play("finish");
     } catch (err) {
+      cleanLiveNodes();
       State.chatHistory.pop();
       input.value = query;
       State.stateOverride = null;
@@ -140,6 +303,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       Sound.play("error");
     } finally {
       sending = false;
+      cleanLiveNodes();
+      activeStatus = null;
+      lastSearchedCount = 0;
+      streamedContent = "";
+      memoryUpdatedInTurn = false;
       State.notify();
       onHeightChange();
       input.focus();
@@ -181,14 +349,14 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       clearBtn.style.opacity = hasHistory ? "1" : "0";
       clearBtn.style.pointerEvents = hasHistory ? "auto" : "none";
 
-      const thinking = State.stateOverride === "thinking";
-      const count = State.chatHistory.length + (thinking ? 0.5 : 0);
-      if (count !== renderedCount) {
-        renderedCount = count;
-        clear(log);
-        for (const m of State.chatHistory) log.append(bubble(m));
-        if (thinking) log.append(typingDots());
-        log.scrollTop = log.scrollHeight;
+      if (!sending) {
+        const count = State.chatHistory.length;
+        if (count !== renderedCount) {
+          renderedCount = count;
+          clear(log);
+          for (const m of State.chatHistory) log.append(bubble(m));
+          log.scrollTop = log.scrollHeight;
+        }
       }
 
       input.placeholder = State.chatHistory.length === 0 ? "Ask me anything…" : "Continue…";

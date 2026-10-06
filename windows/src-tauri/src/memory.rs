@@ -45,8 +45,15 @@ impl Default for UserProfile {
     fn default() -> Self {
         Self {
             name: String::new(),
-            notes: String::new(),
-            facts: Vec::new(),
+            notes: "User is located in Nairobi, Kenya (Timezone: East Africa Time, EAT / UTC+3)".to_string(),
+            facts: vec![
+                MemoryFact {
+                    id: "fact_location_nairobi".to_string(),
+                    category: "identity".to_string(),
+                    text: "Lives in Nairobi, Kenya".to_string(),
+                    updated_at: current_timestamp(),
+                },
+            ],
             updated_at: current_timestamp(),
         }
     }
@@ -114,10 +121,19 @@ fn user_profile_path() -> PathBuf {
 
 pub fn load_profile() -> UserProfile {
     let path = user_profile_path();
-    match std::fs::read(&path) {
+    let mut profile: UserProfile = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => UserProfile::default(),
+    };
+    if profile.facts.iter().all(|f| !f.text.to_lowercase().contains("nairobi")) {
+        profile.facts.push(MemoryFact {
+            id: "fact_location_nairobi".to_string(),
+            category: "identity".to_string(),
+            text: "Lives in Nairobi, Kenya".to_string(),
+            updated_at: current_timestamp(),
+        });
     }
+    profile
 }
 
 pub fn save_profile(profile: &UserProfile) -> Result<(), String> {
@@ -216,20 +232,24 @@ pub fn format_memory_for_prompt() -> String {
     )
 }
 
-/// Parses and extracts any `<remember category="...">...</remember>` tags
-/// from the assistant response. Automatically stores them in `user_profile.json`
-/// and returns the cleaned text without the tags.
-pub fn extract_and_save_memory(raw_text: &str) -> String {
+/// Parses and extracts any `<remember category="...">...</remember>` or `<memory>...</memory>` tags
+/// from the assistant response, as well as detecting explicit memory requests in the user query.
+/// Automatically stores them in `user_profile.json` and returns (cleaned_text, was_memory_updated).
+pub fn extract_and_save_memory(user_query: &str, raw_text: &str) -> (String, bool) {
     let mut cleaned = String::new();
     let mut remaining = raw_text;
+    let mut updated = false;
 
-    while let Some(start_idx) = remaining.find("<remember") {
+    while let Some(start_idx) = remaining.find("<remember").or_else(|| remaining.find("<memory")) {
         cleaned.push_str(&remaining[..start_idx]);
         let after_start = &remaining[start_idx..];
+        let tag_is_memory = after_start.starts_with("<memory");
+        let close_tag = if tag_is_memory { "</memory>" } else { "</remember>" };
+
         if let Some(tag_close) = after_start.find('>') {
             let tag_header = &after_start[..tag_close];
             let after_tag = &after_start[tag_close + 1..];
-            if let Some(end_idx) = after_tag.find("</remember>") {
+            if let Some(end_idx) = after_tag.find(close_tag) {
                 let fact_content = after_tag[..end_idx].trim();
                 let category = if let Some(cat_start) = tag_header.find("category=\"") {
                     let cat_val = &tag_header[cat_start + 10..];
@@ -251,16 +271,44 @@ pub fn extract_and_save_memory(raw_text: &str) -> String {
 
                 if !fact_content.is_empty() {
                     let _ = add_or_update_fact(category, fact_content);
+                    updated = true;
                 }
 
-                remaining = &after_tag[end_idx + 11..];
+                remaining = &after_tag[end_idx + close_tag.len()..];
                 continue;
             }
         }
-        // If malformed, advance past "<remember" to avoid infinite loop
-        cleaned.push_str("<remember");
-        remaining = after_start;
+        // If malformed, advance past '<' to avoid infinite loop
+        cleaned.push('<');
+        remaining = &after_start[1..];
     }
     cleaned.push_str(remaining);
-    cleaned.trim().to_string()
+    let final_text = cleaned.trim().to_string();
+
+    // Fallback: If user explicitly instructed Mochi to remember something
+    if !updated {
+        let q_lower = user_query.trim().to_lowercase();
+        let is_remember_request = q_lower.starts_with("remember that ")
+            || q_lower.starts_with("remember i ")
+            || q_lower.starts_with("remember my ")
+            || q_lower.starts_with("my name is ");
+
+        if is_remember_request {
+            let fact = if let Some(stripped) = user_query.trim().strip_prefix("remember that ") {
+                stripped.trim()
+            } else if let Some(stripped) = user_query.trim().strip_prefix("remember ") {
+                stripped.trim()
+            } else {
+                user_query.trim()
+            };
+
+            if !fact.is_empty() {
+                let cat = if q_lower.contains("name") { "identity" } else { "preference" };
+                let _ = add_or_update_fact(cat, fact);
+                updated = true;
+            }
+        }
+    }
+
+    (final_text, updated)
 }

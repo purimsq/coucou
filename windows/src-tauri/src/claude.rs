@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
 
 use crate::secrets;
 
@@ -29,13 +30,277 @@ You have web search access and can help with absolutely anything — research, c
 Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
 No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
 
-pub fn system_prompt() -> String {
-    let mem = crate::memory::format_memory_for_prompt();
-    if mem.is_empty() {
-        SYSTEM_PROMPT.to_string()
-    } else {
-        format!("{SYSTEM_PROMPT}\n\n{mem}")
+fn day_of_week(y: u32, m: u32, d: u32) -> &'static str {
+    let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if m < 3 { y.saturating_sub(1) } else { y };
+    let dow = (y + y / 4 - y / 100 + y / 400 + t[(m.saturating_sub(1) % 12) as usize] + d) % 7;
+    match dow {
+        0 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        _ => "Saturday",
     }
+}
+
+fn month_name(m: u32) -> &'static str {
+    match m {
+        1 => "January", 2 => "February", 3 => "March", 4 => "April",
+        5 => "May", 6 => "June", 7 => "July", 8 => "August",
+        9 => "September", 10 => "October", 11 => "November", _ => "December",
+    }
+}
+
+pub fn system_prompt() -> String {
+    let lt = crate::platform::local_time();
+    let dow = day_of_week(lt.year, lt.month, lt.day);
+    let month = month_name(lt.month);
+    let date_str = format!("{dow}, {month} {}, {}", lt.day, lt.year);
+    let time_str = format!("{:02}:{:02}", lt.hour, lt.minute);
+    let mem = crate::memory::format_memory_for_prompt();
+
+    let temporal_ctx = format!(
+        "CURRENT TEMPORAL & LOCATION CONTEXT:\n\
+         • Current Year: 2026 (exact system year: {})\n\
+         • Current Date: {}\n\
+         • Current Time: {} (local PC clock)\n\
+         • User Location: Nairobi, Kenya (Timezone: East Africa Time, EAT / UTC+3)\n\n\
+         CRITICAL TEMPORAL, GROUNDING & MEMORY INSTRUCTIONS:\n\
+         1. The current year is 2026. Do NOT assume it is 2023 or 2024. Any events from 2023, 2024, or 2025 are in the past.\n\
+         2. The user is located in Nairobi, Kenya. Tailor location, weather, and time references to Nairobi accordingly.\n\
+         3. You have real-time live internet grounding and web search access. When answering questions regarding recent sports seasons, current scores, schedules, or events, rely on live web grounding results.\n\
+         4. Permanent Memory & Profile: You have a permanent long-term memory system and user profile on this PC. Whenever the user shares information about themselves (their name, interests, hobbies, favorite teams, work, preferences, guidelines) or asks you to remember something, you MUST save it by appending a memory tag at the very end of your response:\n\
+            <remember category=\"preference\">fact to remember</remember>\n\
+            (Categories: identity, preference, interest, note). Coucou will automatically extract and save it to your permanent memory, and display a 'Memory updated' pill to the user.\n\
+         5. Be helpful, concise, and friendly. Plain text only (no markdown *, #, or bullets).",
+        lt.year, date_str, time_str
+    );
+
+    if mem.is_empty() {
+        format!("{SYSTEM_PROMPT}\n\n{temporal_ctx}")
+    } else {
+        format!("{SYSTEM_PROMPT}\n\n{temporal_ctx}\n\nUSER PROFILE & MEMORY:\n{mem}")
+    }
+}
+
+// ── Web Search & Grounding ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchItem {
+    pub title: String,
+    pub snippet: String,
+}
+
+fn urlencoding_encode(input: &str) -> String {
+    let mut encoded = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            b' ' => encoded.push('+'),
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            out.push(c);
+        }
+    }
+    out.replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .trim()
+        .to_string()
+}
+
+fn parse_lite_duckduckgo_html(html: &str) -> Vec<SearchItem> {
+    let mut titles = Vec::new();
+    let mut snippets = Vec::new();
+
+    let mut search_from = 0;
+    while let Some(pos) = html[search_from..].find("result-link") {
+        let abs_pos = search_from + pos;
+        if let Some(open_gt) = html[abs_pos..].find('>') {
+            let title_start = abs_pos + open_gt + 1;
+            if let Some(close_a) = html[title_start..].find("</a>") {
+                let raw_title = &html[title_start..title_start + close_a];
+                let title = strip_html_tags(raw_title);
+                if !title.is_empty() {
+                    titles.push(title);
+                }
+                search_from = title_start + close_a + 4;
+                continue;
+            }
+        }
+        search_from = abs_pos + 11;
+    }
+
+    let mut search_from = 0;
+    while let Some(pos) = html[search_from..].find("result-snippet") {
+        let abs_pos = search_from + pos;
+        if let Some(open_gt) = html[abs_pos..].find('>') {
+            let snip_start = abs_pos + open_gt + 1;
+            if let Some(close_td) = html[snip_start..].find("</td>") {
+                let raw_snip = &html[snip_start..snip_start + close_td];
+                let snippet = strip_html_tags(raw_snip);
+                if !snippet.is_empty() {
+                    snippets.push(snippet);
+                }
+                search_from = snip_start + close_td + 5;
+                continue;
+            }
+        }
+        search_from = abs_pos + 14;
+    }
+
+    let mut items = Vec::new();
+    let count = titles.len().min(snippets.len()).min(4);
+    for i in 0..count {
+        items.push(SearchItem {
+            title: titles[i].clone(),
+            snippet: snippets[i].clone(),
+        });
+    }
+    if items.is_empty() && !snippets.is_empty() {
+        for s in snippets.into_iter().take(4) {
+            items.push(SearchItem {
+                title: "Web Source".to_string(),
+                snippet: s,
+            });
+        }
+    }
+    items
+}
+
+pub async fn perform_web_search(query: &str) -> Vec<SearchItem> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let params = [("q", query)];
+    let resp = client
+        .post("https://lite.duckduckgo.com/lite/")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&params)
+        .send()
+        .await;
+
+    if let Ok(r) = resp {
+        if let Ok(html) = r.text().await {
+            let items = parse_lite_duckduckgo_html(&html);
+            if !items.is_empty() {
+                return items;
+            }
+        }
+    }
+
+    let enc = urlencoding_encode(query);
+    let api_url = format!("https://api.duckduckgo.com/?q={enc}&format=json");
+    if let Ok(r) = client.get(&api_url).header("User-Agent", "Mozilla/5.0").send().await {
+        if let Ok(val) = r.json::<Value>().await {
+            let mut fallback_items = Vec::new();
+            if let Some(abs) = val.get("AbstractText").and_then(Value::as_str) {
+                if !abs.is_empty() {
+                    let heading = val.get("Heading").and_then(Value::as_str).unwrap_or("Web Result");
+                    fallback_items.push(SearchItem {
+                        title: heading.to_string(),
+                        snippet: abs.to_string(),
+                    });
+                }
+            }
+            if !fallback_items.is_empty() {
+                return fallback_items;
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+pub fn should_search_web(query: &str) -> bool {
+    let q = query.to_lowercase();
+    if q.contains("search")
+        || q.contains("google")
+        || q.contains("look up")
+        || q.contains("browse")
+        || q.contains("internet")
+        || q.contains("online")
+        || q.contains("find out")
+        || q.contains("check the web")
+    {
+        return true;
+    }
+    if q.contains("current")
+        || q.contains("latest")
+        || q.contains("today")
+        || q.contains("tonight")
+        || q.contains("now")
+        || q.contains("recent")
+        || q.contains("this week")
+        || q.contains("this month")
+        || q.contains("this year")
+    {
+        return true;
+    }
+    if q.contains("season")
+        || q.contains("started")
+        || q.contains("starts")
+        || q.contains("start")
+        || q.contains("who won")
+        || q.contains("winner")
+        || q.contains("champion")
+        || q.contains("score")
+        || q.contains("standing")
+        || q.contains("schedule")
+        || q.contains("nba")
+        || q.contains("epl")
+        || q.contains("premier league")
+        || q.contains("champions league")
+        || q.contains("game")
+        || q.contains("match")
+    {
+        return true;
+    }
+    if q.contains("2024") || q.contains("2025") || q.contains("2026") || q.contains("2027") {
+        return true;
+    }
+    if q.starts_with("has ")
+        || q.starts_with("did ")
+        || q.starts_with("is ")
+        || q.starts_with("when is")
+        || q.starts_with("when does")
+        || q.starts_with("who is the current")
+        || q.starts_with("what is the current")
+        || q.starts_with("what's the current")
+    {
+        return true;
+    }
+    false
 }
 
 #[derive(Default)]
@@ -88,11 +353,13 @@ pub enum ChatContext {
 #[serde(rename_all = "camelCase")]
 pub struct ChatReply {
     pub text: String,
+    pub memory_updated: bool,
 }
 
 /// One chat turn. Dispatches to Gemini if model starts with "gemini" or if
 /// only Gemini key is configured.
 pub async fn send(
+    app: &AppHandle,
     chat: &Chat,
     model: &str,
     query: String,
@@ -104,7 +371,7 @@ pub async fn send(
             .or_else(|| model.strip_prefix("ollama:"))
             .or_else(|| model.strip_prefix("lmstudio:"))
             .unwrap_or(model);
-        return send_local(chat, clean_model, query, context).await;
+        return send_local(app, chat, clean_model, query, context).await;
     }
 
     let has_anthropic = secrets::present("anthropic-api-key");
@@ -112,17 +379,17 @@ pub async fn send(
 
     if model.starts_with("gemini") {
         if has_gemini {
-            send_gemini(chat, model, query, context).await
+            send_gemini(app, chat, model, query, context).await
         } else if has_anthropic {
-            send_anthropic(chat, "claude-opus-5", query, context).await
+            send_anthropic(app, chat, "claude-opus-5", query, context).await
         } else {
             Err("Gemini API key missing. Open settings to enter your Google AI key.".to_string())
         }
     } else {
         if has_anthropic {
-            send_anthropic(chat, model, query, context).await
+            send_anthropic(app, chat, model, query, context).await
         } else if has_gemini {
-            send_gemini(chat, DEFAULT_GEMINI_MODEL, query, context).await
+            send_gemini(app, chat, DEFAULT_GEMINI_MODEL, query, context).await
         } else {
             Err("API key missing. Open settings to enter your Anthropic or Google Gemini API key.".to_string())
         }
@@ -186,6 +453,7 @@ fn parse_gemini_error(status: reqwest::StatusCode, text: &str) -> String {
 }
 
 async fn send_gemini(
+    app: &AppHandle,
     chat: &Chat,
     model: &str,
     query: String,
@@ -196,6 +464,23 @@ async fn send_gemini(
 
     let mut user_text = query.clone();
     let mut image_payload: Option<(String, String)> = None;
+
+    if should_search_web(&query) {
+        let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
+        let search_items = perform_web_search(&query).await;
+        if !search_items.is_empty() {
+            let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
+            let mut grounding = String::from("\n\n[LIVE WEB GROUNDING — CURRENT REAL-TIME SEARCH RESULTS]:\n");
+            for (i, item) in search_items.iter().enumerate() {
+                grounding.push_str(&format!("{}. {}\n   Excerpt: {}\n", i + 1, item.title, item.snippet));
+            }
+            grounding.push_str("Based on these fresh web results, answer the user's query accurately for the current year 2026.\n");
+            user_text.push_str(&grounding);
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    }
+
+    let _ = app.emit("chat-status", json!({ "status": "thinking", "detail": "Thinking…" }));
 
     if let Some(ctx) = &context {
         match ctx {
@@ -244,8 +529,6 @@ async fn send_gemini(
     let sys_prompt = system_prompt();
     let mut messages = vec![json!({ "role": "system", "content": sys_prompt })];
     let snapshot = chat.snapshot();
-    // Sliding context window: keep the last 12 messages for immediate conversational context
-    // while preventing token explosion and keeping local CPU/network overhead minimal.
     let window_start = if snapshot.len() > 12 { snapshot.len() - 12 } else { 0 };
     for m in &snapshot[window_start..] {
         if let (Some(role), Some(content)) = (m.get("role"), m.get("content")) {
@@ -260,6 +543,7 @@ async fn send_gemini(
     let body = json!({
         "model": model,
         "messages": messages,
+        "stream": true,
     });
 
     let client = reqwest::Client::builder()
@@ -267,7 +551,7 @@ async fn send_gemini(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client
+    let mut response = client
         .post(GEMINI_ENDPOINT)
         .header("Authorization", format!("Bearer {key}"))
         .header("content-type", "application/json")
@@ -285,93 +569,55 @@ async fn send_gemini(
             }
         })?;
 
-    let status = response.status();
-    let text = response.text().await.map_err(|e| {
-        chat.pop();
-        format!("Could not read response: {e}")
-    })?;
-    if !status.is_success() {
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
         chat.pop();
         return Err(parse_gemini_error(status, &text));
     }
 
-    let parsed: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            chat.pop();
-            return Err(format!("Bad API response from Gemini: {e}"));
-        }
-    };
+    let mut reply_text = String::new();
+    let mut buffer = String::new();
 
-    let first_choice = parsed.get("choices").and_then(|c| c.get(0));
-
-    // 1. Try standard text content
-    let mut reply_text = first_choice
-        .and_then(|c0| c0.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    // 2. If empty, check reasoning_content (used by thinking models)
-    if reply_text.is_empty() {
-        if let Some(reasoning) = first_choice
-            .and_then(|c0| c0.get("message"))
-            .and_then(|m| m.get("reasoning_content"))
-            .and_then(Value::as_str)
-        {
-            reply_text = reasoning.trim().to_string();
-        }
-    }
-
-    // 3. If still empty, inspect the exact reason so it never fails silently
-    if reply_text.is_empty() {
-        chat.pop();
-
-        if let Some(refusal) = first_choice
-            .and_then(|c0| c0.get("message"))
-            .and_then(|m| m.get("refusal"))
-            .and_then(Value::as_str)
-        {
-            return Err(format!("Gemini declined to answer: {refusal}"));
-        }
-
-        if let Some(finish_reason) = first_choice
-            .and_then(|c0| c0.get("finish_reason"))
-            .and_then(Value::as_str)
-        {
-            match finish_reason.to_lowercase().as_str() {
-                "safety" | "content_filter" => {
-                    return Err("Gemini blocked the response due to its content safety filters.".into());
+    while let Ok(Some(chunk)) = response.chunk().await {
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&chunk_str);
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim().to_string();
+            buffer = buffer[pos + 1..].to_string();
+            if let Some(json_str) = line.strip_prefix("data: ") {
+                let json_trimmed = json_str.trim();
+                if json_trimmed == "[DONE]" {
+                    break;
                 }
-                "length" => {
-                    return Err("Gemini reached its maximum output token limit before completing the response.".into());
-                }
-                "recitation" => {
-                    return Err("Gemini blocked the response due to copyright/recitation policy.".into());
-                }
-                "stop" => {
-                    return Err("Gemini completed generation without producing any text.".into());
-                }
-                other => {
-                    return Err(format!("Gemini produced no text (finish reason: {other})."));
+                if let Ok(v) = serde_json::from_str::<Value>(json_trimmed) {
+                    if let Some(delta) = v.get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c0| c0.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(Value::as_str)
+                    {
+                        if !delta.is_empty() {
+                            reply_text.push_str(delta);
+                            let _ = app.emit("chat-token", json!({ "token": delta, "done": false }));
+                        }
+                    }
                 }
             }
         }
-
-        if let Some(block_reason) = parsed
-            .get("promptFeedback")
-            .and_then(|pf| pf.get("blockReason"))
-            .and_then(Value::as_str)
-        {
-            return Err(format!("Gemini blocked the prompt: {block_reason}."));
-        }
-
-        return Err("Gemini returned an empty response with no text content.".into());
     }
 
-    let cleaned_reply = crate::memory::extract_and_save_memory(&reply_text);
+    let _ = app.emit("chat-token", json!({ "token": "", "done": true }));
+
+    if reply_text.trim().is_empty() {
+        chat.pop();
+        return Err("Gemini returned an empty response.".into());
+    }
+
+    let (cleaned_reply, memory_updated) = crate::memory::extract_and_save_memory(&query, &reply_text);
+    if memory_updated {
+        let _ = app.emit("memory-updated", json!({ "updated": true }));
+    }
 
     chat.push(json!({
         "role": "assistant",
@@ -380,7 +626,10 @@ async fn send_gemini(
 
     let _ = crate::memory::append_chat_turn(&query, &cleaned_reply);
 
-    Ok(ChatReply { text: cleaned_reply })
+    Ok(ChatReply {
+        text: cleaned_reply,
+        memory_updated,
+    })
 }
 
 static LLAMA_SERVER_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
@@ -835,6 +1084,7 @@ async fn ensure_llama_server_running(model_tag: &str) -> Result<String, String> 
 }
 
 async fn send_local(
+    app: &AppHandle,
     chat: &Chat,
     model: &str,
     query: String,
@@ -851,6 +1101,23 @@ async fn send_local(
     let endpoint = endpoint.trim_end_matches('/');
 
     let mut user_text = query.clone();
+
+    if should_search_web(&query) {
+        let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
+        let search_items = perform_web_search(&query).await;
+        if !search_items.is_empty() {
+            let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
+            let mut grounding = String::from("\n\n[LIVE WEB GROUNDING — CURRENT REAL-TIME SEARCH RESULTS]:\n");
+            for (i, item) in search_items.iter().enumerate() {
+                grounding.push_str(&format!("{}. {}\n   Excerpt: {}\n", i + 1, item.title, item.snippet));
+            }
+            grounding.push_str("Based on these fresh web results, answer the user's query accurately for the current year 2026.\n");
+            user_text.push_str(&grounding);
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    }
+
+    let _ = app.emit("chat-status", json!({ "status": "thinking", "detail": "Thinking…" }));
 
     if let Some(ctx) = &context {
         match ctx {
@@ -912,11 +1179,14 @@ async fn send_local(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Attempt 1: OpenAI-compatible /v1/chat/completions (supported by Ollama, LM Studio, etc.)
+    let mut reply_text = String::new();
+
+    // Attempt 1: OpenAI-compatible /v1/chat/completions (supported by llama-server, Ollama, LM Studio)
     let body = json!({
         "model": actual_model,
         "messages": messages,
         "temperature": 0.7,
+        "stream": true,
     });
 
     let openai_url = format!("{endpoint}/v1/chat/completions");
@@ -927,17 +1197,36 @@ async fn send_local(
         .send()
         .await;
 
-    let reply_text = match res {
-        Ok(resp) if resp.status().is_success() => {
-            let json: Value = resp.json().await.unwrap_or(json!({}));
-            json.get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c0| c0.get("message"))
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string()
+    match res {
+        Ok(mut resp) if resp.status().is_success() => {
+            let mut buffer = String::new();
+            while let Ok(Some(chunk)) = resp.chunk().await {
+                let chunk_str = String::from_utf8_lossy(&chunk);
+                buffer.push_str(&chunk_str);
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim().to_string();
+                    buffer = buffer[pos + 1..].to_string();
+                    if let Some(json_str) = line.strip_prefix("data: ") {
+                        let json_trimmed = json_str.trim();
+                        if json_trimmed == "[DONE]" {
+                            break;
+                        }
+                        if let Ok(v) = serde_json::from_str::<Value>(json_trimmed) {
+                            if let Some(delta) = v.get("choices")
+                                .and_then(|c| c.get(0))
+                                .and_then(|c0| c0.get("delta"))
+                                .and_then(|d| d.get("content"))
+                                .and_then(Value::as_str)
+                            {
+                                if !delta.is_empty() {
+                                    reply_text.push_str(delta);
+                                    let _ = app.emit("chat-token", json!({ "token": delta, "done": false }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
             // Attempt 2: Fallback to native Ollama /api/chat
@@ -945,66 +1234,65 @@ async fn send_local(
             let ollama_body = json!({
                 "model": model,
                 "messages": messages,
-                "stream": false,
+                "stream": true,
             });
-            let o_res = client
+            if let Ok(mut o_res) = client
                 .post(&ollama_url)
                 .header("content-type", "application/json")
                 .json(&ollama_body)
                 .send()
                 .await
-                .map_err(|e| {
-                    chat.pop();
-                    format!("Local server error: {e}")
-                })?;
-            if !o_res.status().is_success() {
-                chat.pop();
-                return Err(format!("Local model error (HTTP {}): {}", o_res.status(), o_res.text().await.unwrap_or_default()));
-            }
-            let o_json: Value = o_res.json().await.unwrap_or(json!({}));
-            o_json.get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        }
-        Ok(resp) => {
-            chat.pop();
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Local model error (HTTP {status}): {text}"));
-        }
-        Err(e) => {
-            chat.pop();
-            if e.is_connect() {
-                return Err(format!(
-                    "Could not connect to local model server at {endpoint}. Ensure Ollama (`ollama serve`) or LM Studio is running."
-                ));
-            } else if e.is_timeout() {
-                return Err("Local model timed out (120s). The model might still be loading or generating on CPU.".into());
-            } else {
-                return Err(format!("Local model network error: {e}"));
+            {
+                let mut buffer = String::new();
+                while let Ok(Some(chunk)) = o_res.chunk().await {
+                    let chunk_str = String::from_utf8_lossy(&chunk);
+                    buffer.push_str(&chunk_str);
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim().to_string();
+                        buffer = buffer[pos + 1..].to_string();
+                        if !line.is_empty() {
+                            if let Ok(val) = serde_json::from_str::<Value>(&line) {
+                                if let Some(content) = val.get("message").and_then(|m| m.get("content")).and_then(Value::as_str) {
+                                    if !content.is_empty() {
+                                        reply_text.push_str(content);
+                                        let _ = app.emit("chat-token", json!({ "token": content, "done": false }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-    };
+        _ => {}
+    }
 
-    if reply_text.is_empty() {
+    let _ = app.emit("chat-token", json!({ "token": "", "done": true }));
+
+    if reply_text.trim().is_empty() {
         chat.pop();
         return Err("Local model produced an empty response.".into());
     }
 
-    let cleaned_reply = crate::memory::extract_and_save_memory(&reply_text);
+    let (cleaned_reply, memory_updated) = crate::memory::extract_and_save_memory(&query, &reply_text);
+    if memory_updated {
+        let _ = app.emit("memory-updated", json!({ "updated": true }));
+    }
+
     chat.push(json!({
         "role": "assistant",
         "content": [{ "type": "text", "text": cleaned_reply.clone() }]
     }));
     let _ = crate::memory::append_chat_turn(&query, &cleaned_reply);
 
-    Ok(ChatReply { text: cleaned_reply })
+    Ok(ChatReply {
+        text: cleaned_reply,
+        memory_updated,
+    })
 }
 
 async fn send_anthropic(
+    app: &AppHandle,
     chat: &Chat,
     model: &str,
     query: String,
@@ -1012,6 +1300,25 @@ async fn send_anthropic(
 ) -> Result<ChatReply, String> {
     let key = secrets::get("anthropic-api-key")
         .ok_or_else(|| "API key missing. Open settings.".to_string())?;
+
+    let mut user_text = query.clone();
+
+    if should_search_web(&query) {
+        let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
+        let search_items = perform_web_search(&query).await;
+        if !search_items.is_empty() {
+            let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
+            let mut grounding = String::from("\n\n[LIVE WEB GROUNDING — CURRENT REAL-TIME SEARCH RESULTS]:\n");
+            for (i, item) in search_items.iter().enumerate() {
+                grounding.push_str(&format!("{}. {}\n   Excerpt: {}\n", i + 1, item.title, item.snippet));
+            }
+            grounding.push_str("Based on these fresh web results, answer the user's query accurately for the current year 2026.\n");
+            user_text.push_str(&grounding);
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    }
+
+    let _ = app.emit("chat-status", json!({ "status": "thinking", "detail": "Thinking…" }));
 
     let mut content: Vec<Value> = Vec::new();
 
@@ -1056,7 +1363,7 @@ async fn send_anthropic(
             }
         }
     }
-    content.push(json!({ "type": "text", "text": query.clone() }));
+    content.push(json!({ "type": "text", "text": user_text }));
 
     chat.push(json!({ "role": "user", "content": content }));
 
@@ -1068,87 +1375,25 @@ async fn send_anthropic(
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": system_prompt(),
-        "tools": [{ "type": "web_search_20260209", "name": "web_search", "max_uses": 5 }],
-        "fallbacks": "default",
+        "stream": true,
         "messages": window_messages,
     });
 
-    let response = match call(&key, &body).await {
-        Ok(v) => v,
-        Err(err) => {
-            chat.pop(); // keep the history consistent with what the model saw
-            return Err(err);
-        }
-    };
-
-    // A policy decline comes back as HTTP 200 with stop_reason "refusal".
-    if response.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        chat.pop();
-        let why = response
-            .get("stop_details")
-            .and_then(|d| d.get("explanation"))
-            .and_then(Value::as_str)
-            .unwrap_or("Claude declined this request due to policy.");
-        return Err(why.to_string());
-    }
-
-    let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {
-        chat.pop();
-        return Err("Unexpected API response from Claude (missing content array).".into());
-    };
-
-    let text = blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-
-    if text.is_empty() {
-        chat.pop();
-        if let Some(stop) = response.get("stop_reason").and_then(Value::as_str) {
-            match stop {
-                "max_tokens" => {
-                    return Err("Claude reached its maximum output token limit before generating text.".into());
-                }
-                "tool_use" => {
-                    return Err("Claude requested a tool action without generating text.".into());
-                }
-                other => {
-                    return Err(format!("Claude finished without text (stop reason: {other})."));
-                }
-            }
-        }
-        return Err("Claude returned an empty response.".into());
-    }
-
-    let cleaned_reply = crate::memory::extract_and_save_memory(&text);
-
-    // Store the whole content — tool_use / tool_result blocks included — so the
-    // next turn has the right context.
-    chat.push(json!({ "role": "assistant", "content": blocks.clone() }));
-    let _ = crate::memory::append_chat_turn(&query, &cleaned_reply);
-    Ok(ChatReply { text: cleaned_reply })
-}
-
-async fn call(key: &str, body: &Value) -> Result<Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client
+    let mut response = client
         .post(ENDPOINT)
-        .header("x-api-key", key)
+        .header("x-api-key", &key)
         .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("anthropic-beta", FALLBACK_BETA)
         .header("content-type", "application/json")
-        .json(body)
+        .json(&body)
         .send()
         .await
         .map_err(|e| {
+            chat.pop();
             if e.is_timeout() {
                 "Request timed out (90s): Claude took too long to respond. The server or connection may be stalled.".to_string()
             } else if e.is_connect() {
@@ -1158,9 +1403,10 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
             }
         })?;
 
-    let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        chat.pop();
         let detail = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| {
@@ -1179,7 +1425,52 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
         }
         return Err(format!("Claude API {status}: {detail}"));
     }
-    serde_json::from_str(&text).map_err(|e| format!("Bad API response from Claude: {e}"))
+
+    let mut reply_text = String::new();
+    let mut buffer = String::new();
+
+    while let Ok(Some(chunk)) = response.chunk().await {
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&chunk_str);
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim().to_string();
+            buffer = buffer[pos + 1..].to_string();
+            if let Some(json_str) = line.strip_prefix("data: ") {
+                let json_trimmed = json_str.trim();
+                if let Ok(v) = serde_json::from_str::<Value>(json_trimmed) {
+                    if v.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+                        if let Some(delta) = v.get("delta").and_then(|d| d.get("text")).and_then(Value::as_str) {
+                            if !delta.is_empty() {
+                                reply_text.push_str(delta);
+                                let _ = app.emit("chat-token", json!({ "token": delta, "done": false }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = app.emit("chat-token", json!({ "token": "", "done": true }));
+
+    if reply_text.trim().is_empty() {
+        chat.pop();
+        return Err("Claude returned an empty response.".into());
+    }
+
+    let (cleaned_reply, memory_updated) = crate::memory::extract_and_save_memory(&query, &reply_text);
+    if memory_updated {
+        let _ = app.emit("memory-updated", json!({ "updated": true }));
+    }
+    chat.push(json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": cleaned_reply.clone() }]
+    }));
+    let _ = crate::memory::append_chat_turn(&query, &cleaned_reply);
+    Ok(ChatReply {
+        text: cleaned_reply,
+        memory_updated,
+    })
 }
 
 

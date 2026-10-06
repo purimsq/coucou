@@ -32,6 +32,8 @@ export interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
+  siteCount?: number;
+  memoryUpdated?: boolean;
 }
 
 export type PromptContext =
