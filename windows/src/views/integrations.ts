@@ -386,6 +386,10 @@ function sportsCard(): HTMLElement {
       h("span", { class: "pulse", style: "background:#FF6B35" }),
       h("span", { text: `${liveCount} live`, style: "color:#FF6B35;font-weight:600" }),
     );
+  } else if (games.length > 0) {
+    extra.append(
+      h("span", { text: `${games.length} games`, style: "color:var(--dim-2);font-size:10px" }),
+    );
   }
 
   const tabsContainer = h("div", { class: "sports-tabs" });
@@ -402,6 +406,7 @@ function sportsCard(): HTMLElement {
 
   function renderRows() {
     clear(rowsContainer);
+    rowsContainer.scrollTop = 0;
     let filtered = games;
     if (currentSportFilter !== "ALL") {
       filtered = games.filter((g) => {
@@ -425,7 +430,7 @@ function sportsCard(): HTMLElement {
       return;
     }
 
-    for (const g of sorted.slice(0, 3)) {
+    for (const g of sorted) {
       const isLive = g.isLive || g.state === "in";
       const isFinal = g.state === "post";
       const away = g.away || {};
@@ -503,13 +508,21 @@ function sportsCard(): HTMLElement {
   renderTabs();
   renderRows();
 
-  return h(
+  const cardEl = h(
     "div",
     { class: "int-card sports-card" },
     header("#FF6B35", "Sports", "Scores", extra),
     tabsContainer,
     rowsContainer,
   );
+
+  cardEl.addEventListener("wheel", (e: WheelEvent) => {
+    if (rowsContainer.scrollHeight > rowsContainer.clientHeight) {
+      rowsContainer.scrollTop += e.deltaY;
+    }
+  }, { passive: true });
+
+  return cardEl;
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────

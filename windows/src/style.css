@@ -1261,13 +1261,23 @@ input[type="range"]::-webkit-slider-thumb {
   height: 28px;
 }
 
+.sports-card {
+  height: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px 4px 108px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .sports-tabs {
   display: flex;
   gap: 4px;
-  padding-top: 4px;
-  padding-bottom: 2px;
+  padding-top: 3px;
+  padding-bottom: 3px;
   overflow-x: auto;
   scrollbar-width: none;
+  flex-shrink: 0;
 }
 
 .sports-tabs::-webkit-scrollbar {
@@ -1285,6 +1295,7 @@ input[type="range"]::-webkit-slider-thumb {
   white-space: nowrap;
   transition: all 0.12s ease;
   line-height: 1.4;
+  flex-shrink: 0;
 }
 
 .sports-tab:hover {
@@ -1296,6 +1307,43 @@ input[type="range"]::-webkit-slider-thumb {
   background: #FF6B35;
   color: #fff;
   font-weight: 600;
+}
+
+.sports-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 68px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 3px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.sports-rows::-webkit-scrollbar {
+  width: 3.5px;
+}
+
+.sports-rows::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sports-rows::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+}
+
+.sports-rows::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.sports-rows .int-row {
+  transition: background 0.12s ease;
+}
+
+.sports-rows .int-row:hover {
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .int-stats {
