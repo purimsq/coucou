@@ -539,12 +539,7 @@ async fn send_local(
                         }
                     }
                     crate::files::FileContentInfo::Image { .. } => {
-                        let ocr_text = crate::files::ocr_image_file(path);
-                        if !ocr_text.is_empty() {
-                            user_text = format!("Image Document ({name}) Extracted OCR Text:\n{ocr_text}\n\n{user_text}");
-                        } else {
-                            user_text = format!("Image ({name}) attached.\n\n{user_text}");
-                        }
+                        user_text = format!("Image ({name}) attached.\n\n{user_text}");
                     }
                 }
             }
