@@ -185,7 +185,7 @@ async fn send_gemini(
     let key = secrets::get("gemini-api-key")
         .ok_or_else(|| "Gemini API key missing. Open settings.".to_string())?;
 
-    let mut user_text = query;
+    let mut user_text = query.clone();
     let mut image_payload: Option<(String, String)> = None;
 
     if let Some(ctx) = &context {
@@ -426,7 +426,7 @@ async fn send_anthropic(
             }
         }
     }
-    content.push(json!({ "type": "text", "text": query }));
+    content.push(json!({ "type": "text", "text": query.clone() }));
 
     chat.push(json!({ "role": "user", "content": content }));
 

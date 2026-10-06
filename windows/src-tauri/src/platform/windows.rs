@@ -58,8 +58,6 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 /// Nothing to set up before the webview starts.
 pub fn prepare_environment() {}
 
-pub fn configure_autostart(_enabled: bool) {}
-
 pub fn local_time() -> LocalTime {
     let t = unsafe { GetLocalTime() };
     LocalTime {
