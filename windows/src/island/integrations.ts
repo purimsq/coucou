@@ -37,6 +37,10 @@ export async function refreshConfigured() {
     data: {}, error: null, loaded: false, configured: false,
   };
   State.integrations.integration_claude = { ...claude, configured: hooks };
+  const sports = State.integrations.integration_sports ?? {
+    data: {}, error: null, loaded: false, configured: false,
+  };
+  State.integrations.integration_sports = { ...sports, configured: true };
   State.notify();
 }
 

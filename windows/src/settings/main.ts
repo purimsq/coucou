@@ -215,7 +215,9 @@ function apiSection(hasKey: boolean): HTMLElement {
   if (!MODELS.some(([id]) => id === settings.model)) {
     model.append(h("option", { value: settings.model, text: settings.model }));
   }
-  model.value = !settings.model.startsWith("gemini") ? settings.model : "claude-opus-5";
+  model.value = (!settings.model.startsWith("gemini") && !settings.model.startsWith("local:") && !settings.model.startsWith("ollama:"))
+    ? settings.model
+    : "claude-opus-5";
   model.addEventListener("change", () => {
     settings.model = model.value;
     void save();
@@ -261,10 +263,10 @@ function apiSection(hasKey: boolean): HTMLElement {
   const prevUpdate = updateProviderBadges;
   updateProviderBadges = () => {
     prevUpdate();
-    const isGemini = settings.model.startsWith("gemini");
-    activeBadge.style.display = !isGemini ? "" : "none";
-    activateBtn.style.display = isGemini ? "" : "none";
-    if (!isGemini && MODELS.some(([id]) => id === settings.model)) {
+    const isClaude = !settings.model.startsWith("gemini") && !settings.model.startsWith("local:") && !settings.model.startsWith("ollama:");
+    activeBadge.style.display = isClaude ? "" : "none";
+    activateBtn.style.display = !isClaude ? "" : "none";
+    if (isClaude && MODELS.some(([id]) => id === settings.model)) {
       model.value = settings.model;
     }
   };
@@ -386,6 +388,171 @@ function geminiSection(hasKey: boolean): HTMLElement {
     state,
     h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
+    feedback,
+  );
+}
+
+// ── Local Model (Offline / Ollama) section ────────────────────────────────────
+
+const DEFAULT_LOCAL_MODELS: [string, string][] = [
+  ["llama3.2", "Llama 3.2 3B (Recommended Meta)"],
+  ["llama3.2:1b", "Llama 3.2 1B (Ultralight Meta)"],
+  ["qwen2.5:0.5b", "Qwen 2.5 0.5B (Fastest)"],
+  ["qwen2.5:1.5b", "Qwen 2.5 1.5B (Alibaba)"],
+  ["qwen2.5:7b", "Qwen 2.5 7B (High Quality)"],
+  ["mistral", "Mistral 7B (Mistral AI)"],
+  ["deepseek-r1:1.5b", "DeepSeek R1 1.5B (Reasoning)"],
+  ["phi3", "Phi-3 Mini 3.8B (Microsoft)"],
+];
+
+function localModelSection(hasUrl: boolean): HTMLElement {
+  const dot = statusDot(hasUrl);
+  const state = h("span", {
+    class: "hint",
+    text: hasUrl
+      ? "Local server configured. Run models privately on your PC without cloud keys."
+      : "Run offline models privately (Ollama, LM Studio) without API keys or data leaving your PC.",
+  });
+  const activeBadge = h("span", { class: "badge-active", text: "Active" });
+  const activateBtn = h("button", { class: "btn-activate", text: "Use for chat" });
+
+  const urlInput = h("input", {
+    type: "text",
+    placeholder: "http://127.0.0.1:11434",
+    style: "flex:1 1 auto;min-width:0",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+
+  const saveUrlBtn = h("button", { text: "Save URL" });
+  const testBtn = h("button", { class: "primary", text: "Test & Fetch Models" });
+  const feedback = h("div", {});
+
+  const modelSelect = h("select", {}) as HTMLSelectElement;
+  for (const [id, label] of DEFAULT_LOCAL_MODELS) {
+    modelSelect.append(h("option", { value: id, text: label }));
+  }
+
+  const currentLocalTag = settings.model.startsWith("local:")
+    ? settings.model.slice("local:".length)
+    : settings.model.startsWith("ollama:")
+      ? settings.model.slice("ollama:".length)
+      : "";
+
+  if (currentLocalTag && !DEFAULT_LOCAL_MODELS.some(([id]) => id === currentLocalTag)) {
+    modelSelect.append(h("option", { value: currentLocalTag, text: `${currentLocalTag} (custom)` }));
+  }
+  if (currentLocalTag) {
+    modelSelect.value = currentLocalTag;
+  }
+
+  const customModelInput = h("input", {
+    type: "text",
+    placeholder: "Or custom model tag (e.g. gemma2:2b, llama3.1:8b)…",
+    style: "flex:1 1 auto;min-width:0",
+  }) as HTMLInputElement;
+
+  modelSelect.addEventListener("change", () => {
+    if (settings.model.startsWith("local:") || settings.model.startsWith("ollama:")) {
+      settings.model = `local:${modelSelect.value}`;
+      void save();
+    }
+    updateProviderBadges();
+  });
+
+  activateBtn.addEventListener("click", () => {
+    const chosen = customModelInput.value.trim() || modelSelect.value || "llama3.2";
+    settings.model = `local:${chosen}`;
+    void save();
+    updateProviderBadges();
+    clear(feedback);
+    feedback.append(h("div", { class: "notice ok", text: `Active! Mochi is now powered by local model (${chosen}).` }));
+    setTimeout(() => clear(feedback), 3500);
+  });
+
+  saveUrlBtn.addEventListener("click", async () => {
+    const val = urlInput.value.trim();
+    if (!val) return;
+    clear(feedback);
+    try {
+      await Bridge.secretSet("local-model-url", val);
+      dot.style.background = "#22c55e";
+      feedback.append(h("div", { class: "notice ok", text: "Saved local endpoint." }));
+      setTimeout(() => clear(feedback), 2500);
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Failed to save endpoint: ${String(err)}` }));
+    }
+  });
+
+  testBtn.addEventListener("click", async () => {
+    testBtn.disabled = true;
+    clear(feedback);
+    feedback.append(h("div", { class: "hint", text: "Connecting to local model server…" }));
+    const url = urlInput.value.trim() || undefined;
+    try {
+      const models = await Bridge.testLocalModel(url);
+      clear(feedback);
+      dot.style.background = "#22c55e";
+      if (models && models.length > 0) {
+        clear(modelSelect);
+        for (const m of models) {
+          modelSelect.append(h("option", { value: m, text: `${m} (installed)` }));
+        }
+        feedback.append(h("div", {
+          class: "notice ok",
+          text: `Connected! Detected ${models.length} installed model(s) on your local server.`,
+        }));
+      } else {
+        feedback.append(h("div", {
+          class: "notice ok",
+          text: "Connected to local server! (No downloaded models in catalog yet. Run `ollama pull llama3.2` or enter custom model).",
+        }));
+      }
+    } catch (err) {
+      clear(feedback);
+      dot.style.background = "#f4505e";
+      feedback.append(h("div", {
+        class: "notice warn",
+        text: `Could not connect: ${String(err).replace(/^Error:\s*/, "")}. Make sure Ollama (\`ollama serve\`) or LM Studio is running.`,
+      }));
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+
+  const prevUpdate = updateProviderBadges;
+  updateProviderBadges = () => {
+    prevUpdate();
+    const isLocal = settings.model.startsWith("local:") || settings.model.startsWith("ollama:");
+    activeBadge.style.display = isLocal ? "" : "none";
+    activateBtn.style.display = !isLocal ? "" : "none";
+    if (isLocal) {
+      const tag = settings.model.startsWith("local:") ? settings.model.slice(6) : settings.model.slice(7);
+      if (Array.from(modelSelect.options).some((o) => o.value === tag)) {
+        modelSelect.value = tag;
+      }
+    }
+  };
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, dot, h("span", { text: "Local Model (Offline / Ollama)" }), activeBadge, activateBtn),
+    state,
+    h("div", { class: "row" },
+      h("label", { text: "Endpoint URL" }),
+      urlInput,
+      saveUrlBtn,
+      testBtn,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Installed model" }),
+      modelSelect,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Custom model tag" }),
+      customModelInput,
+    ),
     feedback,
   );
 }
@@ -771,6 +938,12 @@ interface IntegrationDef {
 }
 
 const INTEGRATIONS: IntegrationDef[] = [
+  { id: "integration_sports", name: "Sports Scores", color: "#FF6B35",
+    fields: [
+      { key: "sports-sport", label: "Preferred sport", placeholder: "all (or nba, soccer, ucl, nfl, mlb, nhl)", secret: false },
+      { key: "sports-endpoint", label: "Custom endpoint", placeholder: "Leave empty for default ESPN scoreboards", secret: false },
+      { key: "sports-api-key", label: "Custom API key", placeholder: "Optional API key (if custom provider requires)", secret: true },
+    ] },
   { id: "integration_stripe", name: "Stripe", color: "#0570DE",
     fields: [{ key: "stripe-api-key", label: "Secret key", placeholder: "sk_live_…", secret: true }] },
   { id: "integration_github", name: "GitHub", color: "#F4505E",
@@ -819,6 +992,37 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
 
     const rows = h("div", { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" });
     for (const field of def.fields) {
+      if (field.key === "sports-sport") {
+        const sportSelect = h("select", { style: "flex:1 1 auto;min-width:0" },
+          h("option", { value: "all", text: "All Sports (NBA, Soccer, NFL, MLB, NHL)" }),
+          h("option", { value: "nba", text: "NBA (Basketball)" }),
+          h("option", { value: "soccer", text: "Premier League (Soccer)" }),
+          h("option", { value: "ucl", text: "UEFA Champions League" }),
+          h("option", { value: "nfl", text: "NFL (American Football)" }),
+          h("option", { value: "mlb", text: "MLB (Baseball)" }),
+          h("option", { value: "nhl", text: "NHL (Hockey)" }),
+        ) as HTMLSelectElement;
+        const saveSportBtn = h("button", { text: "Save" });
+        const dotEl = statusDot(present[field.key] ?? true);
+        saveSportBtn.addEventListener("click", async () => {
+          try {
+            await Bridge.secretSet(field.key, sportSelect.value);
+            present[field.key] = true;
+            dotEl.style.background = "#22c55e";
+            void Bridge.refreshIntegration("integration_sports");
+          } catch {
+            dotEl.style.background = "#f5a524";
+          }
+        });
+        rows.append(
+          h("div", { class: "row" },
+            h("label", { style: "min-width:104px", text: field.label }),
+            sportSelect, saveSportBtn, dotEl,
+          ),
+        );
+        continue;
+      }
+
       const input = h("input", {
         type: field.secret ? "password" : "text",
         placeholder: present[field.key] ? "••••••••  (stored)" : field.placeholder,
@@ -836,6 +1040,9 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
           input.value = "";
           input.placeholder = value ? "••••••••  (stored)" : field.placeholder;
           dotEl.style.background = value ? "#22c55e" : "#f4505e";
+          if (def.id === "integration_sports") {
+            void Bridge.refreshIntegration("integration_sports");
+          }
         } catch {
           dotEl.style.background = "#f5a524";
         }
@@ -937,10 +1144,12 @@ async function main() {
 
   const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
   const hasGeminiKey = (await Bridge.secretPresent("gemini-api-key")) ?? false;
+  const hasLocalUrl = (await Bridge.secretPresent("local-model-url")) ?? false;
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
     "n8n-url", "n8n-api-key", "resend-api-key", "notion-api-key", "calcom-api-key",
+    "sports-sport", "sports-endpoint", "sports-api-key", "local-model-url", "local-model-name",
   ];
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;
@@ -958,6 +1167,7 @@ async function main() {
     claudeSection(status),
     apiSection(hasKey),
     geminiSection(hasGeminiKey),
+    localModelSection(hasLocalUrl),
     memorySection(userProfile),
     integrationsSection(present),
     generalSection(),

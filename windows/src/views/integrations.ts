@@ -372,6 +372,146 @@ function n8nDetail(task: AgentTask, onBack: () => void): HTMLElement {
   );
 }
 
+// ── Sports ────────────────────────────────────────────────────────────────────
+
+let currentSportFilter = "ALL";
+
+function sportsCard(): HTMLElement {
+  const games = arr("integration_sports", "games") as Record<string, any>[];
+  const liveCount = games.filter((g) => g.isLive || g.state === "in").length;
+
+  const extra = h("div", { class: "int-total" });
+  if (liveCount > 0) {
+    extra.append(
+      h("span", { class: "pulse", style: "background:#FF6B35" }),
+      h("span", { text: `${liveCount} live`, style: "color:#FF6B35;font-weight:600" }),
+    );
+  }
+
+  const tabsContainer = h("div", { class: "sports-tabs" });
+  const sportsList = [
+    { id: "ALL", label: "All" },
+    { id: "NBA", label: "NBA" },
+    { id: "EPL", label: "Soccer" },
+    { id: "NFL", label: "NFL" },
+    { id: "MLB", label: "MLB" },
+    { id: "NHL", label: "NHL" },
+  ];
+
+  const rowsContainer = h("div", { class: "int-rows tight sports-rows" });
+
+  function renderRows() {
+    clear(rowsContainer);
+    let filtered = games;
+    if (currentSportFilter !== "ALL") {
+      filtered = games.filter((g) => {
+        const sport = String(g.sport || "").toUpperCase();
+        if (currentSportFilter === "EPL") return sport === "EPL" || sport === "SOCCER" || sport === "UCL";
+        return sport === currentSportFilter;
+      });
+    }
+
+    const sorted = [...filtered].sort((a, b) => {
+      const stateOrder: Record<string, number> = { in: 0, pre: 1, post: 2 };
+      return (stateOrder[a.state] ?? 1) - (stateOrder[b.state] ?? 1);
+    });
+
+    if (sorted.length === 0) {
+      rowsContainer.append(h("div", {
+        class: "int-empty",
+        style: "padding:8px 4px;color:var(--dim-2);font-size:11px",
+        text: games.length === 0 ? "Loading scoreboard…" : `No ${currentSportFilter} games scheduled today`,
+      }));
+      return;
+    }
+
+    for (const g of sorted.slice(0, 3)) {
+      const isLive = g.isLive || g.state === "in";
+      const isFinal = g.state === "post";
+      const away = g.away || {};
+      const home = g.home || {};
+      const awayName = away.abbrev || away.name || "AWY";
+      const homeName = home.abbrev || home.name || "HOM";
+      const awayScore = away.score != null ? String(away.score) : "0";
+      const homeScore = home.score != null ? String(home.score) : "0";
+      const detail = g.statusDetail || (isFinal ? "Final" : isLive ? "Live" : "Scheduled");
+
+      const accent = isLive ? "#FF6B35" : isFinal ? "#22C55E" : "#8e939c";
+
+      const matchupEl = h("span", {
+        class: "int-name",
+        style: "display:flex;align-items:center;gap:3px;flex:1 1 auto;min-width:0",
+      });
+
+      const awayScoreEl = h("b", {
+        text: awayScore,
+        style: isFinal && away.winner ? "color:#f5f6f8;font-weight:700" : "color:var(--dim)",
+      });
+      const homeScoreEl = h("b", {
+        text: homeScore,
+        style: isFinal && home.winner ? "color:#f5f6f8;font-weight:700" : "color:var(--dim)",
+      });
+
+      matchupEl.append(
+        h("span", { text: `${awayName} ` }),
+        awayScoreEl,
+        h("span", { text: " - ", style: "color:var(--dim-2);padding:0 1px" }),
+        homeScoreEl,
+        h("span", { text: ` ${homeName}` }),
+      );
+
+      const statusEl = h("span", {
+        class: "int-time",
+        style: isLive ? "color:#FF6B35;font-weight:600" : isFinal ? "color:#9398a1" : "color:var(--dim-2)",
+        text: isLive ? `● ${detail}` : detail,
+      });
+
+      const row = h(
+        "div",
+        { class: isLive ? "int-row first" : "int-row" },
+        dot(accent, 4),
+        h("span", {
+          style: "font-size:9px;padding:1px 3px;border-radius:3px;background:rgba(255,255,255,0.06);color:var(--dim);margin-right:2px",
+          text: String(g.sport || "SPORT"),
+        }),
+        matchupEl,
+        statusEl,
+      );
+
+      rowsContainer.append(row);
+    }
+  }
+
+  function renderTabs() {
+    clear(tabsContainer);
+    for (const s of sportsList) {
+      const active = currentSportFilter === s.id;
+      const btn = h("button", {
+        class: active ? "sports-tab active" : "sports-tab",
+        text: s.label,
+        onclick: (e: Event) => {
+          e.stopPropagation();
+          currentSportFilter = s.id;
+          renderTabs();
+          renderRows();
+        },
+      });
+      tabsContainer.append(btn);
+    }
+  }
+
+  renderTabs();
+  renderRows();
+
+  return h(
+    "div",
+    { class: "int-card sports-card" },
+    header("#FF6B35", "Sports", "Scores", extra),
+    tabsContainer,
+    rowsContainer,
+  );
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 export interface IntegrationCardHooks {
@@ -386,6 +526,8 @@ export function hasIntegrationData(id: string): boolean {
   const info = State.integrations[id];
   if (!info || info.error) return false;
   switch (id) {
+    case "integration_sports":
+      return info.loaded || arr(id, "games").length > 0;
     case "integration_vercel":
       return arr(id, "deployments").length > 0;
     case "integration_resend":
@@ -416,6 +558,8 @@ export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHoo
   if (!hasIntegrationData(task.id)) return idleCard(task, hooks.openSettings);
 
   switch (task.id) {
+    case "integration_sports":
+      return sportsCard();
     case "integration_resend":
       return resendCard();
     case "integration_github":

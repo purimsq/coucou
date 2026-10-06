@@ -62,7 +62,8 @@ pub fn set_paused(on: bool) {
 
 /// Spawns every poller with the macOS delays and intervals.
 pub fn start(app: AppHandle) {
-    spawn(app.clone(), "integration_n8n", 3, 15, poll_n8n);
+    spawn(app.clone(), "integration_sports", 3, 30, poll_sports);
+    spawn(app.clone(), "integration_n8n", 4, 15, poll_n8n);
     spawn(app.clone(), "integration_vercel", 5, 30, poll_vercel);
     spawn(app.clone(), "integration_stripe", 6, 30, poll_stripe);
     spawn(app.clone(), "integration_resend", 6, 60, poll_resend);
@@ -106,6 +107,7 @@ where
 /// One-shot refresh from the Refresh buttons in the island.
 pub async fn poll_once(app: AppHandle, id: &str) {
     match id {
+        "integration_sports" => poll_sports(app).await,
         "integration_stripe" => poll_stripe(app).await,
         "integration_github" => poll_github(app).await,
         "integration_vercel" => poll_vercel(app).await,
@@ -762,4 +764,292 @@ fn fmt_value(v: &Value) -> String {
         Value::Object(_) => "{…}".into(),
         other => other.to_string(),
     }
+}
+
+// ── Sports Scores ─────────────────────────────────────────────────────────────
+
+async fn poll_sports(app: AppHandle) {
+    let custom_endpoint = secrets::get("sports-endpoint").filter(|s| !s.trim().is_empty());
+    let custom_key = secrets::get("sports-api-key").filter(|s| !s.trim().is_empty());
+    let sport_pref = secrets::get("sports-sport")
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "all".to_string());
+
+    let http = client();
+
+    if let Some(endpoint) = custom_endpoint {
+        let mut req = http.get(&endpoint);
+        if let Some(ref key) = custom_key {
+            req = req
+                .header("Authorization", format!("Bearer {key}"))
+                .header("x-apisports-key", key.as_str())
+                .header("X-Auth-Token", key.as_str());
+        }
+        match req.send().await {
+            Ok(res) if res.status().is_success() => {
+                let json: Value = res.json().await.unwrap_or(json!({}));
+                let mut games = parse_espn_events(&json, "CUSTOM");
+                if games.is_empty() {
+                    // Try parsing generic API-Sports or football-data list
+                    games = parse_generic_sports_json(&json);
+                }
+                emit_sports_update(&app, games, &sport_pref);
+            }
+            Ok(res) => {
+                let code = res.status().as_u16();
+                emit(&app, IntegrationUpdate {
+                    id: "integration_sports",
+                    data: json!({ "games": [], "selectedSport": sport_pref }),
+                    error: Some(format!("Custom Sports API returned {code}")),
+                    event: None,
+                });
+            }
+            Err(e) => {
+                emit(&app, IntegrationUpdate {
+                    id: "integration_sports",
+                    data: json!({ "games": [], "selectedSport": sport_pref }),
+                    error: Some(format!("Could not reach custom Sports API: {e}")),
+                    event: None,
+                });
+            }
+        }
+        return;
+    }
+
+    // Default: Public ESPN Scoreboard endpoints
+    let sports_to_fetch: Vec<(&'static str, &'static str)> = match sport_pref.as_str() {
+        "nba" => vec![("NBA", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard")],
+        "soccer" | "epl" => vec![("EPL", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard")],
+        "ucl" => vec![("UCL", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard")],
+        "nfl" => vec![("NFL", "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard")],
+        "mlb" => vec![("MLB", "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard")],
+        "nhl" => vec![("NHL", "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard")],
+        _ => vec![
+            ("NBA", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"),
+            ("EPL", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard"),
+            ("NFL", "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"),
+            ("MLB", "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"),
+            ("NHL", "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"),
+        ],
+    };
+
+    let mut all_games: Vec<Value> = Vec::new();
+    let mut had_success = false;
+
+    for (league, url) in sports_to_fetch {
+        if let Ok(res) = http.get(url).send().await {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<Value>().await {
+                    let mut games = parse_espn_events(&json, league);
+                    all_games.append(&mut games);
+                    had_success = true;
+                }
+            }
+        }
+    }
+
+    if had_success || all_games.is_empty() {
+        emit_sports_update(&app, all_games, &sport_pref);
+    } else {
+        emit(&app, IntegrationUpdate {
+            id: "integration_sports",
+            data: json!({ "games": [], "selectedSport": sport_pref }),
+            error: Some("Unable to reach Sports scoreboard.".into()),
+            event: None,
+        });
+    }
+}
+
+fn parse_espn_events(json: &Value, default_league: &str) -> Vec<Value> {
+    let Some(events) = json.get("events").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    events
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("id")?.as_str()?.to_string();
+            let name = e.get("name").and_then(Value::as_str).unwrap_or("Match").to_string();
+            let short_name = e.get("shortName").and_then(Value::as_str).unwrap_or(&name).to_string();
+            let date = e.get("date").and_then(Value::as_str).unwrap_or("").to_string();
+
+            let status = e.get("status");
+            let state = status
+                .and_then(|s| s.get("type"))
+                .and_then(|t| t.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("pre")
+                .to_string(); // "pre", "in", "post"
+
+            let status_detail = status
+                .and_then(|s| s.get("type"))
+                .and_then(|t| t.get("detail"))
+                .and_then(Value::as_str)
+                .unwrap_or("Scheduled")
+                .to_string();
+
+            let clock = status
+                .and_then(|s| s.get("displayClock"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
+            let period = status
+                .and_then(|s| s.get("period"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+
+            let is_live = state == "in";
+
+            let mut home_val = json!({ "name": "Home", "abbrev": "HOME", "logo": "", "score": "0", "winner": false });
+            let mut away_val = json!({ "name": "Away", "abbrev": "AWAY", "logo": "", "score": "0", "winner": false });
+
+            if let Some(competitors) = e
+                .get("competitions")
+                .and_then(|c| c.get(0))
+                .and_then(|c0| c0.get("competitors"))
+                .and_then(Value::as_array)
+            {
+                for comp in competitors {
+                    let home_away = comp.get("homeAway").and_then(Value::as_str).unwrap_or("");
+                    let team = comp.get("team");
+                    let name = team
+                        .and_then(|t| t.get("shortDisplayName").or_else(|| t.get("displayName")))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Team")
+                        .to_string();
+                    let abbrev = team
+                        .and_then(|t| t.get("abbreviation"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(&name)
+                        .to_string();
+                    let logo = team
+                        .and_then(|t| t.get("logo"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let score = comp
+                        .get("score")
+                        .and_then(|s| s.as_str().map(str::to_string).or_else(|| s.as_i64().map(|n| n.to_string())))
+                        .unwrap_or_else(|| "0".to_string());
+                    let winner = comp.get("winner").and_then(Value::as_bool).unwrap_or(false);
+
+                    let entry = json!({
+                        "name": name,
+                        "abbrev": abbrev,
+                        "logo": logo,
+                        "score": score,
+                        "winner": winner,
+                    });
+
+                    if home_away == "home" {
+                        home_val = entry;
+                    } else {
+                        away_val = entry;
+                    }
+                }
+            }
+
+            Some(json!({
+                "id": id,
+                "sport": default_league,
+                "name": name,
+                "shortName": short_name,
+                "date": date,
+                "state": state,
+                "statusDetail": status_detail,
+                "clock": clock,
+                "period": period,
+                "isLive": is_live,
+                "home": home_val,
+                "away": away_val,
+            }))
+        })
+        .collect()
+}
+
+fn parse_generic_sports_json(json: &Value) -> Vec<Value> {
+    // If custom API returns a list under response/matches/games
+    let list = json
+        .get("response")
+        .or_else(|| json.get("matches"))
+        .or_else(|| json.get("games"))
+        .or_else(|| json.get("data"))
+        .and_then(Value::as_array);
+
+    let Some(arr) = list else { return Vec::new() };
+
+    arr.iter().take(20).enumerate().map(|(idx, item)| {
+        let id = item.get("id").map(|v| v.to_string()).unwrap_or_else(|| idx.to_string());
+        json!({
+            "id": id,
+            "sport": "SPORT",
+            "name": item.get("name").and_then(Value::as_str).unwrap_or("Match"),
+            "shortName": item.get("shortName").and_then(Value::as_str).unwrap_or("VS"),
+            "date": item.get("date").and_then(Value::as_str).unwrap_or(""),
+            "state": item.get("status").and_then(Value::as_str).unwrap_or("pre"),
+            "statusDetail": item.get("status").and_then(Value::as_str).unwrap_or("Scheduled"),
+            "clock": "",
+            "period": 0,
+            "isLive": false,
+            "home": { "name": "Home", "abbrev": "HOM", "logo": "", "score": "0", "winner": false },
+            "away": { "name": "Away", "abbrev": "AWY", "logo": "", "score": "0", "winner": false },
+        })
+    }).collect()
+}
+
+fn emit_sports_update(app: &AppHandle, games: Vec<Value>, sport_pref: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Check for score/status events to notify the user
+    let mut event: Option<IntegrationEvent> = None;
+
+    for g in &games {
+        let id = g.get("id").and_then(Value::as_str).unwrap_or("");
+        let state = g.get("state").and_then(Value::as_str).unwrap_or("");
+        let away_abbrev = g.get("away").and_then(|a| a.get("abbrev")).and_then(Value::as_str).unwrap_or("");
+        let away_score = g.get("away").and_then(|a| a.get("score")).and_then(Value::as_str).unwrap_or("0");
+        let home_abbrev = g.get("home").and_then(|h| h.get("abbrev")).and_then(Value::as_str).unwrap_or("");
+        let home_score = g.get("home").and_then(|h| h.get("score")).and_then(Value::as_str).unwrap_or("0");
+        let status_detail = g.get("statusDetail").and_then(Value::as_str).unwrap_or("");
+
+        if state == "post" {
+            // Newly finished game
+            let finish_key = format!("final-{id}");
+            if is_new("sports_final", &finish_key) {
+                event = Some(IntegrationEvent {
+                    success: true,
+                    label: format!("{away_abbrev} {away_score} - {home_score} {home_abbrev}"),
+                    detail: Some(format!("Final · {status_detail}")),
+                });
+                break;
+            }
+        } else if state == "in" {
+            // Live game with score change
+            let score_key = format!("live-{id}-{away_score}-{home_score}");
+            if is_new("sports_live", &score_key) {
+                event = Some(IntegrationEvent {
+                    success: true,
+                    label: format!("{away_abbrev} {away_score} - {home_score} {home_abbrev}"),
+                    detail: Some(format!("Live · {status_detail}")),
+                });
+                break;
+            }
+        }
+    }
+
+    emit(app, IntegrationUpdate {
+        id: "integration_sports",
+        data: json!({
+            "games": games,
+            "selectedSport": sport_pref,
+            "updatedAt": now,
+        }),
+        error: None,
+        event,
+    });
 }

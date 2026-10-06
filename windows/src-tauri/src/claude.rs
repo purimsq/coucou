@@ -98,6 +98,15 @@ pub async fn send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
+    if model.starts_with("local:") || model.starts_with("ollama:") || model.starts_with("lmstudio:") {
+        let clean_model = model
+            .strip_prefix("local:")
+            .or_else(|| model.strip_prefix("ollama:"))
+            .or_else(|| model.strip_prefix("lmstudio:"))
+            .unwrap_or(model);
+        return send_local(chat, clean_model, query, context).await;
+    }
+
     let has_anthropic = secrets::present("anthropic-api-key");
     let has_gemini = secrets::present("gemini-api-key");
 
@@ -369,6 +378,231 @@ async fn send_gemini(
         "content": [{ "type": "text", "text": cleaned_reply.clone() }]
     }));
 
+    let _ = crate::memory::append_chat_turn(&query, &cleaned_reply);
+
+    Ok(ChatReply { text: cleaned_reply })
+}
+
+pub async fn test_local_server(custom_url: Option<&str>) -> Result<Vec<String>, String> {
+    let endpoint = match custom_url {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => secrets::get("local-model-url").unwrap_or_else(|| "http://127.0.0.1:11434".to_string()),
+    };
+    let endpoint = endpoint.trim_end_matches('/');
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 1. Try Ollama native /api/tags
+    let tags_url = format!("{endpoint}/api/tags");
+    if let Ok(res) = client.get(&tags_url).send().await {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<Value>().await {
+                if let Some(models) = json.get("models").and_then(Value::as_array) {
+                    let names: Vec<String> = models
+                        .iter()
+                        .filter_map(|m| m.get("name").and_then(Value::as_str).map(str::to_string))
+                        .collect();
+                    return Ok(names);
+                }
+            }
+        }
+    }
+
+    // 2. Try OpenAI compatible /v1/models (works for LM Studio, LocalAI, vLLM, etc.)
+    let models_url = format!("{endpoint}/v1/models");
+    match client.get(&models_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            if let Ok(json) = res.json::<Value>().await {
+                if let Some(data) = json.get("data").and_then(Value::as_array) {
+                    let names: Vec<String> = data
+                        .iter()
+                        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+                        .collect();
+                    return Ok(names);
+                }
+            }
+            Ok(vec![])
+        }
+        Ok(res) => Err(format!("Server returned HTTP {}", res.status())),
+        Err(e) => {
+            if e.is_connect() {
+                Err(format!("Could not connect to {endpoint}. Is Ollama or LM Studio running?"))
+            } else if e.is_timeout() {
+                Err(format!("Connection to {endpoint} timed out."))
+            } else {
+                Err(e.to_string())
+            }
+        }
+    }
+}
+
+async fn send_local(
+    chat: &Chat,
+    model: &str,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    let endpoint = secrets::get("local-model-url")
+        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+    let endpoint = endpoint.trim_end_matches('/');
+
+    let mut user_text = query.clone();
+
+    if let Some(ctx) = &context {
+        match ctx {
+            ChatContext::File { name, path } => {
+                match crate::files::inspect_file(path) {
+                    crate::files::FileContentInfo::Text(text) => {
+                        user_text = format!("File: {name}\nContents:\n{text}\n\n{user_text}");
+                    }
+                    crate::files::FileContentInfo::Docx(text) => {
+                        user_text = format!("Word Document ({name}):\n{text}\n\n{user_text}");
+                    }
+                    crate::files::FileContentInfo::Pdf { text_preview, .. } => {
+                        if !text_preview.is_empty() {
+                            user_text = format!("PDF Document ({name}) Extracted Content:\n{text_preview}\n\n{user_text}");
+                        } else {
+                            user_text = format!("PDF Document ({name}) attached.\n\n{user_text}");
+                        }
+                    }
+                    crate::files::FileContentInfo::Image { .. } => {
+                        let ocr_text = crate::files::ocr_image_file(path);
+                        if !ocr_text.is_empty() {
+                            user_text = format!("Image Document ({name}) Extracted OCR Text:\n{ocr_text}\n\n{user_text}");
+                        } else {
+                            user_text = format!("Image ({name}) attached.\n\n{user_text}");
+                        }
+                    }
+                }
+            }
+            ChatContext::Window { app_name, title, url } => {
+                let mut extra = format!("Context — App: {app_name}, Window: {title}");
+                if let Some(u) = url {
+                    extra.push_str(&format!(", URL: {u}"));
+                }
+                user_text = format!("{extra}\n\n{user_text}");
+            }
+        }
+    }
+
+    chat.push(json!({ "role": "user", "content": user_text }));
+
+    let sys_prompt = system_prompt();
+    let mut messages = vec![json!({ "role": "system", "content": sys_prompt })];
+    let snapshot = chat.snapshot();
+    let window_start = if snapshot.len() > 10 { snapshot.len() - 10 } else { 0 };
+    for m in &snapshot[window_start..] {
+        if let (Some(role), Some(content)) = (m.get("role"), m.get("content")) {
+            if let Some(s) = content.as_str() {
+                messages.push(json!({ "role": role, "content": s }));
+            } else if let Some(arr) = content.as_array() {
+                let text = arr
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    messages.push(json!({ "role": role, "content": text }));
+                }
+            }
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Attempt 1: OpenAI-compatible /v1/chat/completions (supported by Ollama, LM Studio, etc.)
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+    });
+
+    let openai_url = format!("{endpoint}/v1/chat/completions");
+    let res = client
+        .post(&openai_url)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    let reply_text = match res {
+        Ok(resp) if resp.status().is_success() => {
+            let json: Value = resp.json().await.unwrap_or(json!({}));
+            json.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c0| c0.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+            // Attempt 2: Fallback to native Ollama /api/chat
+            let ollama_url = format!("{endpoint}/api/chat");
+            let ollama_body = json!({
+                "model": model,
+                "messages": messages,
+                "stream": false,
+            });
+            let o_res = client
+                .post(&ollama_url)
+                .header("content-type", "application/json")
+                .json(&ollama_body)
+                .send()
+                .await
+                .map_err(|e| {
+                    chat.pop();
+                    format!("Local server error: {e}")
+                })?;
+            if !o_res.status().is_success() {
+                chat.pop();
+                return Err(format!("Local model error (HTTP {}): {}", o_res.status(), o_res.text().await.unwrap_or_default()));
+            }
+            let o_json: Value = o_res.json().await.unwrap_or(json!({}));
+            o_json.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        Ok(resp) => {
+            chat.pop();
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Local model error (HTTP {status}): {text}"));
+        }
+        Err(e) => {
+            chat.pop();
+            if e.is_connect() {
+                return Err(format!(
+                    "Could not connect to local model server at {endpoint}. Ensure Ollama (`ollama serve`) or LM Studio is running."
+                ));
+            } else if e.is_timeout() {
+                return Err("Local model timed out (120s). The model might still be loading or generating on CPU.".into());
+            } else {
+                return Err(format!("Local model network error: {e}"));
+            }
+        }
+    };
+
+    if reply_text.is_empty() {
+        chat.pop();
+        return Err("Local model produced an empty response.".into());
+    }
+
+    let cleaned_reply = crate::memory::extract_and_save_memory(&reply_text);
+    chat.push(json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": cleaned_reply.clone() }]
+    }));
     let _ = crate::memory::append_chat_turn(&query, &cleaned_reply);
 
     Ok(ChatReply { text: cleaned_reply })

@@ -9,6 +9,8 @@ const SERVICE: &str = "fr.louisraille.coucou";
 pub const KNOWN_KEYS: &[&str] = &[
     "anthropic-api-key",
     "gemini-api-key",
+    "local-model-url",
+    "local-model-name",
     "n8n-url",
     "n8n-api-key",
     "vercel-token",
@@ -17,6 +19,9 @@ pub const KNOWN_KEYS: &[&str] = &[
     "resend-api-key",
     "notion-api-key",
     "calcom-api-key",
+    "sports-api-key",
+    "sports-endpoint",
+    "sports-sport",
 ];
 
 fn entry(key: &str) -> Option<Entry> {

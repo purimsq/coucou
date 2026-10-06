@@ -281,6 +281,11 @@ fn chat_clear(chat: State<Chat>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn test_local_model(url: Option<String>) -> Result<Vec<String>, String> {
+    claude::test_local_server(url.as_deref()).await
+}
+
+#[tauri::command]
 fn profile_get() -> UserProfile {
     memory::load_profile()
 }
@@ -454,6 +459,7 @@ pub fn run() {
             chat_reset,
             chat_load,
             chat_clear,
+            test_local_model,
             profile_get,
             profile_save,
             profile_fact_add,
