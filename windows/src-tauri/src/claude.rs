@@ -242,6 +242,36 @@ pub async fn perform_web_search(query: &str) -> Vec<SearchItem> {
     Vec::new()
 }
 
+pub fn format_grounding_system_context(search_query: &str, search_items: &[SearchItem]) -> String {
+    let mut block = String::from(
+        "\n\n======================================================\n\
+         [REAL-TIME WEB GROUNDING ENGINE — LIVE SEARCH FINDINGS]\n\
+         ======================================================\n\
+         The system performed a live web search for: \""
+    );
+    block.push_str(search_query);
+    block.push_str("\".\nHere are the live, authoritative sources and excerpts retrieved:\n\n");
+
+    for (i, item) in search_items.iter().enumerate() {
+        block.push_str(&format!(
+            "--- SOURCE [{}] ---\nTitle: {}\nSnippet: {}\n\n",
+            i + 1, item.title, item.snippet
+        ));
+    }
+
+    block.push_str(
+        "CRITICAL GROUNDING SYNTHESIS INSTRUCTIONS (HOW TO REPLY):\n\
+         1. COMPREHEND & REASON: Read through the retrieved sources above carefully. Digest the actual facts, dates, scores, and context.\n\
+         2. SYNTHESIZE AN ORIGINAL RESPONSE: Do NOT just paste, copy, or dump raw search snippets. Instead, write a thoughtful, natural, and comprehensive reply in Mochi's personal voice, answering the user's question directly based on what you learned.\n\
+         3. QUOTE EXACT FACTS & SPECIFIC DETAILS: Quote or state exact dates, game scores, team names, or quotes from the search findings to give an authoritative and precise answer.\n\
+         4. TEMPORAL ACCURACY: Remember that the current year is 2026. Explain the current status, schedule, or history accurately for 2026 without referencing outdated 2023/2024 information as 'current'.\n\
+         5. NO ROBOTIC META-COMMENTARY: Avoid starting with robotic phrases like 'According to search result 1' or 'Based on web results'. Just answer naturally and authoritatively like an AI assistant with live knowledge.\n\
+         ======================================================\n"
+    );
+
+    block
+}
+
 pub fn should_search_web(query: &str) -> bool {
     let q = query.to_lowercase();
     if q.contains("search")
@@ -465,17 +495,19 @@ async fn send_gemini(
     let mut user_text = query.clone();
     let mut image_payload: Option<(String, String)> = None;
 
+    let mut grounding_block: Option<String> = None;
+
     if should_search_web(&query) {
         let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
-        let search_items = perform_web_search(&query).await;
+        let search_query = if !query.contains("202") && (query.to_lowercase().contains("season") || query.to_lowercase().contains("nba") || query.to_lowercase().contains("winner") || query.to_lowercase().contains("champion") || query.to_lowercase().contains("score")) {
+            format!("{query} 2025-2026")
+        } else {
+            query.clone()
+        };
+        let search_items = perform_web_search(&search_query).await;
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
-            let mut grounding = String::from("\n\n[LIVE WEB GROUNDING — CURRENT REAL-TIME SEARCH RESULTS]:\n");
-            for (i, item) in search_items.iter().enumerate() {
-                grounding.push_str(&format!("{}. {}\n   Excerpt: {}\n", i + 1, item.title, item.snippet));
-            }
-            grounding.push_str("Based on these fresh web results, answer the user's query accurately for the current year 2026.\n");
-            user_text.push_str(&grounding);
+            grounding_block = Some(format_grounding_system_context(&query, &search_items));
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
@@ -526,7 +558,10 @@ async fn send_gemini(
         chat.push(json!({ "role": "user", "content": user_text }));
     }
 
-    let sys_prompt = system_prompt();
+    let mut sys_prompt = system_prompt();
+    if let Some(g) = grounding_block {
+        sys_prompt.push_str(&g);
+    }
     let mut messages = vec![json!({ "role": "system", "content": sys_prompt })];
     let snapshot = chat.snapshot();
     let window_start = if snapshot.len() > 12 { snapshot.len() - 12 } else { 0 };
@@ -1101,18 +1136,19 @@ async fn send_local(
     let endpoint = endpoint.trim_end_matches('/');
 
     let mut user_text = query.clone();
+    let mut grounding_block: Option<String> = None;
 
     if should_search_web(&query) {
         let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
-        let search_items = perform_web_search(&query).await;
+        let search_query = if !query.contains("202") && (query.to_lowercase().contains("season") || query.to_lowercase().contains("nba") || query.to_lowercase().contains("winner") || query.to_lowercase().contains("champion") || query.to_lowercase().contains("score")) {
+            format!("{query} 2025-2026")
+        } else {
+            query.clone()
+        };
+        let search_items = perform_web_search(&search_query).await;
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
-            let mut grounding = String::from("\n\n[LIVE WEB GROUNDING — CURRENT REAL-TIME SEARCH RESULTS]:\n");
-            for (i, item) in search_items.iter().enumerate() {
-                grounding.push_str(&format!("{}. {}\n   Excerpt: {}\n", i + 1, item.title, item.snippet));
-            }
-            grounding.push_str("Based on these fresh web results, answer the user's query accurately for the current year 2026.\n");
-            user_text.push_str(&grounding);
+            grounding_block = Some(format_grounding_system_context(&query, &search_items));
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
@@ -1153,7 +1189,10 @@ async fn send_local(
 
     chat.push(json!({ "role": "user", "content": user_text }));
 
-    let sys_prompt = system_prompt();
+    let mut sys_prompt = system_prompt();
+    if let Some(g) = grounding_block {
+        sys_prompt.push_str(&g);
+    }
     let mut messages = vec![json!({ "role": "system", "content": sys_prompt })];
     let snapshot = chat.snapshot();
     let window_start = if snapshot.len() > 10 { snapshot.len() - 10 } else { 0 };
@@ -1302,18 +1341,19 @@ async fn send_anthropic(
         .ok_or_else(|| "API key missing. Open settings.".to_string())?;
 
     let mut user_text = query.clone();
+    let mut grounding_block: Option<String> = None;
 
     if should_search_web(&query) {
         let _ = app.emit("chat-status", json!({ "status": "searching", "detail": "Searching the web…", "siteCount": 0 }));
-        let search_items = perform_web_search(&query).await;
+        let search_query = if !query.contains("202") && (query.to_lowercase().contains("season") || query.to_lowercase().contains("nba") || query.to_lowercase().contains("winner") || query.to_lowercase().contains("champion") || query.to_lowercase().contains("score")) {
+            format!("{query} 2025-2026")
+        } else {
+            query.clone()
+        };
+        let search_items = perform_web_search(&search_query).await;
         if !search_items.is_empty() {
             let _ = app.emit("chat-status", json!({ "status": "searched", "detail": format!("Searched {} websites", search_items.len()), "siteCount": search_items.len() }));
-            let mut grounding = String::from("\n\n[LIVE WEB GROUNDING — CURRENT REAL-TIME SEARCH RESULTS]:\n");
-            for (i, item) in search_items.iter().enumerate() {
-                grounding.push_str(&format!("{}. {}\n   Excerpt: {}\n", i + 1, item.title, item.snippet));
-            }
-            grounding.push_str("Based on these fresh web results, answer the user's query accurately for the current year 2026.\n");
-            user_text.push_str(&grounding);
+            grounding_block = Some(format_grounding_system_context(&query, &search_items));
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
@@ -1371,10 +1411,15 @@ async fn send_anthropic(
     let window_start = if snapshot.len() > 12 { snapshot.len() - 12 } else { 0 };
     let window_messages: Vec<Value> = snapshot[window_start..].to_vec();
 
+    let mut sys_prompt = system_prompt();
+    if let Some(g) = grounding_block {
+        sys_prompt.push_str(&g);
+    }
+
     let body = json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
-        "system": system_prompt(),
+        "system": sys_prompt,
         "stream": true,
         "messages": window_messages,
     });
